@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agent Status Light</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body data-state="idle">
+    <main id="app" class="shell" role="button" tabindex="0" aria-label="Agent status light">
+      <header class="titlebar">
+        <span>Agent Status Light</span>
+        <button id="toggle" type="button">Expand</button>
+      </header>
+      <section class="overall">
+        <div id="overallLight" class="light" aria-label="Idle"></div>
+        <div class="copy">
+          <div id="overallLabel" class="label">Idle</div>
+          <div id="overallMessage" class="message">No active sessions</div>
+        </div>
+      </section>
+      <section id="tree" class="tree" aria-live="polite"></section>
+    </main>
+    <script src="./renderer.js"></script>
+  </body>
+</html>

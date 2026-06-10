@@ -1,0 +1,9 @@
+{
+  "port": 8787,
+  "staleTimeoutMs": 600000,
+  "doneToIdleMs": 10000,
+  "enableSound": true,
+  "enableNotifications": true,
+  "enableWled": false,
+  "wledDeviceUrl": "http://192.168.1.xxx"
+}

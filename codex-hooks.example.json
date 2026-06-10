@@ -1,0 +1,67 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /Users/leoclaw/Documents/AgentLight/agent-status-light/scripts/codex-hook-reporter.js running \"Codex is running\"",
+            "timeout": 5,
+            "statusMessage": "Updating Agent Status Light"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /Users/leoclaw/Documents/AgentLight/agent-status-light/scripts/codex-hook-reporter.js running \"Codex is using a tool\"",
+            "timeout": 5,
+            "statusMessage": "Updating Agent Status Light"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /Users/leoclaw/Documents/AgentLight/agent-status-light/scripts/codex-hook-reporter.js waiting_approval \"Codex needs approval\"",
+            "timeout": 5,
+            "statusMessage": "Updating Agent Status Light"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /Users/leoclaw/Documents/AgentLight/agent-status-light/scripts/codex-hook-reporter.js running \"Codex is running\"",
+            "timeout": 5,
+            "statusMessage": "Updating Agent Status Light"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /Users/leoclaw/Documents/AgentLight/agent-status-light/scripts/codex-hook-reporter.js done \"Codex finished\"",
+            "timeout": 5,
+            "statusMessage": "Updating Agent Status Light"
+          }
+        ]
+      }
+    ]
+  }
+}
