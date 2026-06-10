@@ -1,0 +1,3 @@
+- Improve session title extraction
+- Add hardware light / WLED support
+- Package as a macOS app
