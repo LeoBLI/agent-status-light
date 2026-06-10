@@ -1,3 +1,4 @@
+Status: v0.1.0 — working local MVP for Codex CLI/Desktop hooks.
 # Agent Status Light
 
 Agent Status Light is a local desktop status light for Codex. It accepts status updates from multiple signal sources, serves a unified status API on `http://localhost:8787`, and shows a small always-on-top Electron floating window.
