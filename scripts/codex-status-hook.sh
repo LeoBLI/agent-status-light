@@ -4,9 +4,9 @@ set -u
 
 STATE="${1:-idle}"
 MESSAGE="${2:-Codex status changed}"
-LOG_FILE="/Users/leoclaw/Projects/agent-status-light/logs/codex-hook.log"
+LOG_FILE="/Users/leoclaw/Projects/AgentWatch/logs/codex-hook.log"
 STDIN_PAYLOAD="$(cat)"
-REPORTER="/Users/leoclaw/Projects/agent-status-light/scripts/codex-hook-reporter.js"
+REPORTER="/Users/leoclaw/Projects/AgentWatch/scripts/codex-hook-reporter.js"
 
 if [[ "$STDIN_PAYLOAD" == *'"hook_event_name"'* && "$STDIN_PAYLOAD" == *'"Stop"'* ]]; then
   STATE="done"

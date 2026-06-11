@@ -6,7 +6,7 @@ const path = require("node:path");
 
 const projectRoot = path.resolve(__dirname, "..");
 const sourceApp = path.join(projectRoot, "node_modules", "electron", "dist", "Electron.app");
-const targetRoot = "/private/tmp/agent-status-light-electron";
+const targetRoot = "/private/tmp/AgentWatch-electron";
 const targetApp = path.join(targetRoot, "Electron.app");
 
 if (!fs.existsSync(sourceApp)) {

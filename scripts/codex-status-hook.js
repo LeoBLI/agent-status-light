@@ -10,7 +10,7 @@ let message = messageParts.join(" ") || defaultMessage(state);
 const project = path.basename(process.cwd());
 const logPath =
   process.env.AGENT_STATUS_LIGHT_HOOK_LOG ||
-  "/Users/leoclaw/Projects/agent-status-light/logs/codex-hook.log";
+  "/Users/leoclaw/Projects/AgentWatch/logs/codex-hook.log";
 
 main().catch((error) => {
   appendLog(`hook unexpected error=${error instanceof Error ? error.message : String(error)}`);

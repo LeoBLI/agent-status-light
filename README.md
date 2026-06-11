@@ -32,7 +32,7 @@ Electron floating panel + macOS menu bar icon
 ## Install
 
 ```bash
-cd /Users/leoclaw/Projects/agent-status-light
+cd /Users/leoclaw/Projects/AgentWatch
 npm install
 ```
 
@@ -239,7 +239,7 @@ Attempts to open a visible session in Codex:
 ```bash
 curl -s -X POST http://localhost:8787/open-session \
   -H "Content-Type: application/json" \
-  -d '{"id":"/Users/leoclaw/Projects/agent-status-light::open-fallback-test"}'
+  -d '{"id":"/Users/leoclaw/Projects/AgentWatch::open-fallback-test"}'
 ```
 
 Behavior:
@@ -305,7 +305,7 @@ Test a session with a thread deeplink:
 ```bash
 curl -s -X POST http://localhost:8787/status \
   -H "Content-Type: application/json" \
-  -d '{"agent":"codex","projectPath":"/Users/leoclaw/Projects/agent-status-light","projectName":"agent-status-light","sessionId":"open-test","title":"Open in Codex 测试","state":"done","source":"manual","message":"Ready to open","codexThreadId":"00000000-0000-0000-0000-000000000000","codexDeepLink":"codex://threads/00000000-0000-0000-0000-000000000000"}'
+  -d '{"agent":"codex","projectPath":"/Users/leoclaw/Projects/AgentWatch","projectName":"AgentWatch","sessionId":"open-test","title":"Open in Codex 测试","state":"done","source":"manual","message":"Ready to open","codexThreadId":"00000000-0000-0000-0000-000000000000","codexDeepLink":"codex://threads/00000000-0000-0000-0000-000000000000"}'
 ```
 
 Test fallback without a thread id:
@@ -313,11 +313,11 @@ Test fallback without a thread id:
 ```bash
 curl -s -X POST http://localhost:8787/status \
   -H "Content-Type: application/json" \
-  -d '{"agent":"codex","projectPath":"/Users/leoclaw/Projects/agent-status-light","projectName":"agent-status-light","sessionId":"open-fallback-test","title":"Open fallback 测试","state":"waiting_approval","source":"manual","message":"Needs approval"}'
+  -d '{"agent":"codex","projectPath":"/Users/leoclaw/Projects/AgentWatch","projectName":"AgentWatch","sessionId":"open-fallback-test","title":"Open fallback 测试","state":"waiting_approval","source":"manual","message":"Needs approval"}'
 
 curl -s -X POST http://localhost:8787/open-session \
   -H "Content-Type: application/json" \
-  -d '{"id":"/Users/leoclaw/Projects/agent-status-light::open-fallback-test"}'
+  -d '{"id":"/Users/leoclaw/Projects/AgentWatch::open-fallback-test"}'
 ```
 
 Test `stale` quickly:
@@ -422,7 +422,7 @@ Dismiss one session:
 ```bash
 curl -s -X POST http://localhost:8787/dismiss-session \
   -H "Content-Type: application/json" \
-  -d '{"id":"/Users/leoclaw/Projects/agent-status-light::session-a"}'
+  -d '{"id":"/Users/leoclaw/Projects/AgentWatch::session-a"}'
 ```
 
 Correct a session title only when you are sure the session `id` belongs to that real Codex session:
@@ -451,7 +451,7 @@ Dismiss a project:
 ```bash
 curl -s -X POST http://localhost:8787/dismiss-project \
   -H "Content-Type: application/json" \
-  -d '{"projectId":"/Users/leoclaw/Projects/agent-status-light"}'
+  -d '{"projectId":"/Users/leoclaw/Projects/AgentWatch"}'
 ```
 
 Dismiss visible done sessions:
@@ -474,11 +474,11 @@ Simulate two sessions in one project:
 ```bash
 curl -s -X POST http://localhost:8787/status \
   -H "Content-Type: application/json" \
-  -d '{"agent":"codex","projectPath":"/Users/leoclaw/Projects/agent-status-light","projectName":"agent-status-light","sessionId":"session-a","sessionName":"修复 UI","state":"waiting_approval","source":"manual","message":"Needs approval"}'
+  -d '{"agent":"codex","projectPath":"/Users/leoclaw/Projects/AgentWatch","projectName":"AgentWatch","sessionId":"session-a","sessionName":"修复 UI","state":"waiting_approval","source":"manual","message":"Needs approval"}'
 
 curl -s -X POST http://localhost:8787/status \
   -H "Content-Type: application/json" \
-  -d '{"agent":"codex","projectPath":"/Users/leoclaw/Projects/agent-status-light","projectName":"agent-status-light","sessionId":"session-b","sessionName":"更新 README","state":"running","source":"manual","message":"Running"}'
+  -d '{"agent":"codex","projectPath":"/Users/leoclaw/Projects/AgentWatch","projectName":"AgentWatch","sessionId":"session-b","sessionName":"更新 README","state":"running","source":"manual","message":"Running"}'
 ```
 
 The project and overall states should be `waiting_approval`.
@@ -496,7 +496,7 @@ Delete one session:
 ```bash
 curl -s -X DELETE http://localhost:8787/session \
   -H "Content-Type: application/json" \
-  -d '{"id":"/Users/leoclaw/Projects/agent-status-light::session-a"}'
+  -d '{"id":"/Users/leoclaw/Projects/AgentWatch::session-a"}'
 ```
 
 The response includes `deletedCount` and `deletedSessionIds`. If your shell or client has trouble sending a JSON body with `DELETE`, use `POST` or a URL-encoded query instead:
@@ -504,7 +504,7 @@ The response includes `deletedCount` and `deletedSessionIds`. If your shell or c
 ```bash
 curl -s -X POST http://localhost:8787/session \
   -H "Content-Type: application/json" \
-  -d '{"id":"/Users/leoclaw/Projects/agent-status-light::session-a"}'
+  -d '{"id":"/Users/leoclaw/Projects/AgentWatch::session-a"}'
 ```
 
 Delete one project:
@@ -600,7 +600,7 @@ User-level hooks are usually simpler because they do not depend on whether a pro
 2. Start Codex CLI in the project:
 
    ```bash
-   codex -C /Users/leoclaw/Projects/agent-status-light
+   codex -C /Users/leoclaw/Projects/AgentWatch
    ```
 
 3. If Codex shows a hook review/trust flow, review and trust the hooks.

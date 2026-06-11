@@ -11,7 +11,7 @@ const message = messageParts.join(" ") || defaultMessage(state);
 const port = Number(process.env.STATUS_LIGHT_PORT || 8787);
 const logPath =
   process.env.AGENT_STATUS_LIGHT_HOOK_LOG ||
-  "/Users/leoclaw/Projects/agent-status-light/logs/codex-hook.log";
+  "/Users/leoclaw/Projects/AgentWatch/logs/codex-hook.log";
 
 main().catch((error) => {
   appendLog(`reporter unexpected error=${error instanceof Error ? error.message : String(error)}`);

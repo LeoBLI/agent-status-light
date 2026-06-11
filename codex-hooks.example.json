@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node /Users/leoclaw/Projects/agent-status-light/scripts/codex-hook-reporter.js running \"Codex is running\"",
+            "command": "node /Users/leoclaw/Projects/AgentWatch/scripts/codex-hook-reporter.js running \"Codex is running\"",
             "timeout": 5,
             "statusMessage": "Updating AgentWatch"
           }
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node /Users/leoclaw/Projects/agent-status-light/scripts/codex-hook-reporter.js running \"Codex is using a tool\"",
+            "command": "node /Users/leoclaw/Projects/AgentWatch/scripts/codex-hook-reporter.js running \"Codex is using a tool\"",
             "timeout": 5,
             "statusMessage": "Updating AgentWatch"
           }
@@ -31,7 +31,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node /Users/leoclaw/Projects/agent-status-light/scripts/codex-hook-reporter.js waiting_approval \"Codex needs approval\"",
+            "command": "node /Users/leoclaw/Projects/AgentWatch/scripts/codex-hook-reporter.js waiting_approval \"Codex needs approval\"",
             "timeout": 5,
             "statusMessage": "Updating AgentWatch"
           }
@@ -44,7 +44,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node /Users/leoclaw/Projects/agent-status-light/scripts/codex-hook-reporter.js running \"Codex is running\"",
+            "command": "node /Users/leoclaw/Projects/AgentWatch/scripts/codex-hook-reporter.js running \"Codex is running\"",
             "timeout": 5,
             "statusMessage": "Updating AgentWatch"
           }
@@ -56,7 +56,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node /Users/leoclaw/Projects/agent-status-light/scripts/codex-hook-reporter.js done \"Codex finished\"",
+            "command": "node /Users/leoclaw/Projects/AgentWatch/scripts/codex-hook-reporter.js done \"Codex finished\"",
             "timeout": 5,
             "statusMessage": "Updating AgentWatch"
           }
