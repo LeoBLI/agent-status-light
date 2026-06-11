@@ -2,6 +2,7 @@
 
 const fs = require("node:fs");
 const http = require("node:http");
+const os = require("node:os");
 const path = require("node:path");
 
 const [, , stateArg, ...messageParts] = process.argv;
@@ -20,7 +21,14 @@ async function main() {
   const stdin = await readStdin();
   const parsed = parseJson(stdin);
   const cwd = typeof parsed?.cwd === "string" ? parsed.cwd : process.cwd();
+  if (isIgnoredProjectPath(cwd)) {
+    appendLog(`ignored hook cwd=${cwd}`);
+    return;
+  }
+
   const hookEventName = text(parsed?.hook_event_name);
+  const codexSessionId = extractCodexSessionId(parsed);
+  const codexThreadId = extractCodexThreadId(parsed);
   const projectPath = cwd;
   const projectName = path.basename(cwd) || "Unknown Project";
   const sessionId =
@@ -54,6 +62,9 @@ async function main() {
     state,
     source: "codex-hook",
     message,
+    codexSessionId,
+    codexThreadId,
+    codexDeepLink: codexThreadId ? `codex://threads/${codexThreadId}` : undefined,
     raw: summarizeHookPayload(parsed, stdin)
   };
 
@@ -112,10 +123,55 @@ function summarizeHookPayload(parsed, raw) {
     threadId: parsed.threadId,
     conversation_id: parsed.conversation_id,
     conversationId: parsed.conversationId,
+    session_meta_payload_id: readPath(parsed, ["session_meta", "payload", "id"]),
     tool_name: parsed.tool_name,
     command: parsed.command,
     permission_request: parsed.permission_request ? true : undefined
   };
+}
+
+function extractCodexThreadId(parsed) {
+  const candidates = [
+    text(readPath(parsed, ["session_meta", "payload", "id"])),
+    text(parsed?.thread_id),
+    text(parsed?.threadId),
+    text(parsed?.session_id),
+    text(parsed?.sessionId),
+    text(parsed?.conversation_id),
+    text(parsed?.conversationId)
+  ];
+
+  return candidates.find(isUuid);
+}
+
+function extractCodexSessionId(parsed) {
+  return (
+    text(parsed?.session_id) ||
+    text(parsed?.sessionId) ||
+    text(parsed?.thread_id) ||
+    text(parsed?.threadId) ||
+    text(parsed?.conversation_id) ||
+    text(parsed?.conversationId)
+  );
+}
+
+function isUuid(value) {
+  return (
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+  );
+}
+
+function readPath(value, keys) {
+  let current = value;
+  for (const key of keys) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) {
+      return undefined;
+    }
+    current = current[key];
+  }
+
+  return current;
 }
 
 function text(value) {
@@ -124,6 +180,29 @@ function text(value) {
 
 function commandText(parsed) {
   return text(parsed?.command) || text(parsed?.tool_input?.command) || text(parsed?.input?.command);
+}
+
+function isIgnoredProjectPath(cwd) {
+  const candidate = text(cwd);
+  if (!candidate) {
+    return false;
+  }
+
+  return ignoredPathPrefixes().some(
+    (prefix) => candidate === prefix || candidate.startsWith(`${prefix}${path.sep}`)
+  );
+}
+
+function ignoredPathPrefixes() {
+  const configured = text(process.env.AGENT_STATUS_LIGHT_IGNORE_PATHS);
+  if (configured) {
+    return configured
+      .split(path.delimiter)
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+  }
+
+  return [path.join(os.homedir(), ".codex", "memories")];
 }
 
 function summarizeText(value) {

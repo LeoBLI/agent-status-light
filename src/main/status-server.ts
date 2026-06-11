@@ -1,12 +1,15 @@
 import { EventEmitter } from "node:events";
+import { execFile, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import http, { IncomingMessage, ServerResponse } from "node:http";
 import path from "node:path";
 import { URL } from "node:url";
+import { promisify } from "node:util";
 import {
   AgentState,
   AppConfig,
   Diagnostics,
+  OpenSessionResult,
   ProjectStatus,
   SessionStatus,
   STATE_PRIORITY,
@@ -16,6 +19,14 @@ import {
   VALID_STATES,
   emptyCounts
 } from "../shared/types";
+import {
+  codexThreadDeepLink,
+  enrichFromCodexSessionIndex,
+  getCodexSessionIndexDiagnostics,
+  isCodexThreadId
+} from "./codex-session-index";
+
+const execFileAsync = promisify(execFile);
 
 interface StatusEvents {
   status: [StatusTree, SessionStatus, SessionStatus | undefined];
@@ -24,7 +35,10 @@ interface StatusEvents {
 interface StatusStoreOptions {
   staleTimeoutMs?: number;
   doneToIdleMs?: number;
+  codexAppName?: string;
+  codexBundleId?: string;
   titleOverridesPath?: string;
+  projectNameOverridesPath?: string;
 }
 
 interface SessionTimers {
@@ -37,14 +51,22 @@ export class StatusStore extends EventEmitter {
   private readonly events: SessionStatus[] = [];
   private readonly createdAt = Date.now();
   private readonly staleTimeoutMs: number;
+  private readonly codexAppName: string;
+  private readonly codexBundleId: string;
   private readonly titleOverridesPath: string | undefined;
   private readonly titleOverrides = new Map<string, string>();
+  private readonly projectNameOverridesPath: string | undefined;
+  private readonly projectNameOverrides = new Map<string, string>();
 
   constructor(options: StatusStoreOptions = {}) {
     super();
     this.staleTimeoutMs = options.staleTimeoutMs ?? 10 * 60 * 1000;
+    this.codexAppName = options.codexAppName || "Codex";
+    this.codexBundleId = options.codexBundleId || "com.openai.codex";
     this.titleOverridesPath = options.titleOverridesPath;
+    this.projectNameOverridesPath = options.projectNameOverridesPath;
     this.loadTitleOverrides();
+    this.loadProjectNameOverrides();
   }
 
   override on<K extends keyof StatusEvents>(
@@ -144,6 +166,14 @@ export class StatusStore extends EventEmitter {
       autoTransitions: {
         doneDisplayMs: 0,
         staleTimeoutMs: this.staleTimeoutMs
+      },
+      codexOpenSupport: {
+        appName: this.codexAppName,
+        bundleId: this.codexBundleId,
+        deeplinkScheme: "codex://",
+        sessionIndexFound: getCodexSessionIndexDiagnostics().found,
+        sessionIndexPath: getCodexSessionIndexDiagnostics().path,
+        threadDeepLinkSupport: "best-effort"
       }
     };
   }
@@ -155,7 +185,7 @@ export class StatusStore extends EventEmitter {
   } {
     const session = this.normalizeInput(input);
     const previous = this.sessions.get(session.id);
-    const next = this.mergeSession(session, previous);
+    const next = this.withCodexOpenTarget(this.mergeSession(session, previous));
 
     this.applySession(next, previous);
     this.dismissLegacyDefaultSessions(next);
@@ -166,6 +196,64 @@ export class StatusStore extends EventEmitter {
       session: next,
       project: tree.projects.find((project) => project.projectId === next.projectId),
       overall: tree.overall
+    };
+  }
+
+  async openSession(id: string): Promise<OpenSessionResult> {
+    const session = this.sessions.get(id);
+    if (!session) {
+      return {
+        ok: false,
+        opened: false,
+        strategy: "failed",
+        fallbackUsed: false,
+        copiedToClipboard: false,
+        message: "Session not found."
+      };
+    }
+
+    const copiedToClipboard = await copyToClipboard(formatClipboardSession(session));
+    const deeplink = session.codexDeepLink;
+
+    if (deeplink) {
+      try {
+        await openCodexDeepLink(deeplink, this.codexBundleId, this.codexAppName);
+        return {
+          ok: true,
+          opened: true,
+          strategy: "deeplink",
+          target: deeplink,
+          fallbackUsed: false,
+          copiedToClipboard,
+          message: "Opened Codex thread deeplink."
+        };
+      } catch {
+        const fallback = await openCodexApp(this.codexAppName, this.codexBundleId);
+        return {
+          ok: fallback,
+          opened: fallback,
+          strategy: fallback ? "open-app" : "failed",
+          target: fallback ? this.codexAppName : deeplink,
+          fallbackUsed: true,
+          copiedToClipboard,
+          message: fallback
+            ? "Opened Codex app. Exact thread deeplink was unavailable."
+            : "Could not open Codex automatically. Session info copied to clipboard."
+        };
+      }
+    }
+
+    const opened = await openCodexApp(this.codexAppName, this.codexBundleId);
+    return {
+      ok: opened,
+      opened,
+      strategy: opened ? "open-app" : "failed",
+      target: this.codexAppName,
+      fallbackUsed: true,
+      copiedToClipboard,
+      message: opened
+        ? "Opened Codex app. Exact thread deeplink was unavailable."
+        : "Could not open Codex automatically. Session info copied to clipboard."
     };
   }
 
@@ -253,6 +341,39 @@ export class StatusStore extends EventEmitter {
     return { ok: true, updatedCount: 1, session: next, tree: this.getStatuses() };
   }
 
+  updateProjectName(projectId: string, projectName: string): {
+    ok: true;
+    updatedCount: number;
+    project?: ProjectStatus;
+    tree: StatusTree;
+  } {
+    this.projectNameOverrides.set(projectId, projectName);
+    this.saveProjectNameOverrides();
+
+    let updatedCount = 0;
+    for (const session of this.sessions.values()) {
+      if (session.projectId === projectId) {
+        const previous = { ...session };
+        const next = {
+          ...session,
+          projectName,
+          updatedAt: Date.now()
+        };
+        this.applySession(next, previous);
+        this.scheduleAutomaticTransitions(next);
+        updatedCount += 1;
+      }
+    }
+
+    const tree = this.getStatuses();
+    return {
+      ok: true,
+      updatedCount,
+      project: tree.projects.find((project) => project.projectId === projectId),
+      tree
+    };
+  }
+
   dismissProject(projectId: string): {
     ok: true;
     dismissedCount: number;
@@ -318,12 +439,13 @@ export class StatusStore extends EventEmitter {
     const projectValue = text(input.project);
     const projectId =
       text(input.projectId) || projectPath || projectValue || text(raw?.cwd) || "unknown-project";
-    const projectName =
+    const inferredProjectName =
       text(input.projectName) ||
       displayNameFromProject(projectValue) ||
       displayNameFromProject(projectPath) ||
       projectValue ||
       "Unknown Project";
+    const projectName = this.projectNameOverrides.get(projectId) || inferredProjectName;
     const sessionId =
       text(input.sessionId) ||
       text(input.taskId) ||
@@ -358,6 +480,10 @@ export class StatusStore extends EventEmitter {
       updatedAt: now,
       createdAt: now,
       visibility: "visible",
+      codexThreadId: pickCodexThreadId(input, raw),
+      codexSessionId: pickCodexSessionId(input, raw),
+      codexSessionPath: text(input.codexSessionPath) || text(raw?.codexSessionPath),
+      codexDeepLink: cleanCodexDeepLink(text(input.codexDeepLink) || text(raw?.codexDeepLink)),
       raw: input.raw
     };
   }
@@ -376,7 +502,12 @@ export class StatusStore extends EventEmitter {
       visibility: previous?.visibility ?? next.visibility ?? "visible",
       dismissedAt: previous?.dismissedAt,
       lastCompletedAt: previous?.lastCompletedAt,
-      lastApprovalAt: previous?.lastApprovalAt
+      lastApprovalAt: previous?.lastApprovalAt,
+      codexThreadId: next.codexThreadId ?? previous?.codexThreadId,
+      codexSessionId: next.codexSessionId ?? previous?.codexSessionId,
+      codexSessionPath: next.codexSessionPath ?? previous?.codexSessionPath,
+      codexDeepLink: next.codexDeepLink ?? previous?.codexDeepLink,
+      openTarget: next.openTarget ?? previous?.openTarget
     };
 
     if (shouldRedisplay(next, previous)) {
@@ -394,6 +525,33 @@ export class StatusStore extends EventEmitter {
 
     merged.displayTitle = makeDisplayTitle(merged);
     return removeUndefined(merged);
+  }
+
+  private withCodexOpenTarget(session: SessionStatus): SessionStatus {
+    const indexed = enrichFromCodexSessionIndex(session);
+    const codexThreadId = session.codexThreadId ?? indexed.codexThreadId;
+    const codexDeepLink =
+      cleanCodexDeepLink(session.codexDeepLink) ||
+      codexThreadDeepLink(codexThreadId) ||
+      cleanCodexDeepLink(indexed.codexDeepLink);
+
+    return removeUndefined({
+      ...session,
+      codexThreadId,
+      codexSessionId: session.codexSessionId,
+      codexSessionPath: session.codexSessionPath ?? indexed.codexSessionPath,
+      codexDeepLink,
+      openTarget: codexDeepLink
+        ? {
+            type: "codex-thread",
+            url: codexDeepLink
+          }
+        : {
+            type: "codex-app",
+            appName: this.codexAppName,
+            fallbackReason: "Exact thread deeplink unavailable."
+          }
+    });
   }
 
   private applySession(next: SessionStatus, previous: SessionStatus | undefined): void {
@@ -495,6 +653,25 @@ export class StatusStore extends EventEmitter {
     }
   }
 
+  private loadProjectNameOverrides(): void {
+    if (!this.projectNameOverridesPath || !existsSync(this.projectNameOverridesPath)) {
+      return;
+    }
+
+    try {
+      const data = JSON.parse(readFileSync(this.projectNameOverridesPath, "utf8")) as unknown;
+      const records = asRecord(data);
+      for (const [projectId, projectName] of Object.entries(records ?? {})) {
+        const cleanProjectName = text(projectName);
+        if (cleanProjectName) {
+          this.projectNameOverrides.set(projectId, cleanProjectName);
+        }
+      }
+    } catch (error) {
+      console.warn("Failed to load project name overrides:", error);
+    }
+  }
+
   private saveTitleOverrides(): void {
     if (!this.titleOverridesPath) {
       return;
@@ -509,6 +686,23 @@ export class StatusStore extends EventEmitter {
       );
     } catch (error) {
       console.warn("Failed to save session title overrides:", error);
+    }
+  }
+
+  private saveProjectNameOverrides(): void {
+    if (!this.projectNameOverridesPath) {
+      return;
+    }
+
+    try {
+      mkdirSync(path.dirname(this.projectNameOverridesPath), { recursive: true });
+      writeFileSync(
+        this.projectNameOverridesPath,
+        `${JSON.stringify(Object.fromEntries(this.projectNameOverrides), null, 2)}\n`,
+        "utf8"
+      );
+    } catch (error) {
+      console.warn("Failed to save project name overrides:", error);
     }
   }
 }
@@ -588,6 +782,18 @@ async function routeRequest(
     return;
   }
 
+  if (url.pathname === "/open-session" && request.method === "POST") {
+    const body = asRecord(await readJsonBody(request));
+    const id = text(body?.id);
+    if (!id) {
+      sendJson(response, 400, { error: "id is required" });
+      return;
+    }
+
+    sendJson(response, 200, await store.openSession(id));
+    return;
+  }
+
   if (url.pathname === "/session" && ["DELETE", "POST"].includes(request.method ?? "")) {
     const body = await readOptionalJsonBody(request);
     const id = text(asRecord(body)?.id) || text(url.searchParams.get("id"));
@@ -622,6 +828,19 @@ async function routeRequest(
     }
 
     sendJson(response, 200, store.updateSessionTitle(id, title));
+    return;
+  }
+
+  if (url.pathname === "/project-name" && request.method === "POST") {
+    const body = asRecord(await readJsonBody(request));
+    const projectId = text(body?.projectId);
+    const projectName = text(body?.projectName);
+    if (!projectId || !projectName) {
+      sendJson(response, 400, { error: "projectId and projectName are required" });
+      return;
+    }
+
+    sendJson(response, 200, store.updateProjectName(projectId, projectName));
     return;
   }
 
@@ -800,6 +1019,165 @@ function shouldRedisplay(next: SessionStatus, previous: SessionStatus | undefine
   }
 
   return ["waiting_approval", "error", "running", "done"].includes(next.state);
+}
+
+function pickCodexThreadId(
+  input: StatusUpdateInput,
+  raw: Record<string, unknown> | undefined
+): string | undefined {
+  const candidates = [
+    text(readPath(raw, ["session_meta", "payload", "id"])),
+    text(input.codexThreadId),
+    text(raw?.codexThreadId),
+    text(raw?.thread_id),
+    text(raw?.threadId),
+    text(input.sessionId),
+    text(raw?.session_id),
+    text(raw?.sessionId),
+    text(raw?.conversation_id),
+    text(raw?.conversationId)
+  ];
+
+  return candidates.find(isCodexThreadId);
+}
+
+function pickCodexSessionId(
+  input: StatusUpdateInput,
+  raw: Record<string, unknown> | undefined
+): string | undefined {
+  return (
+    text(input.codexSessionId) ||
+    text(raw?.codexSessionId) ||
+    text(raw?.session_id) ||
+    text(raw?.sessionId) ||
+    text(raw?.thread_id) ||
+    text(raw?.threadId) ||
+    text(raw?.conversation_id) ||
+    text(raw?.conversationId)
+  );
+}
+
+function cleanCodexDeepLink(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const match = value.match(/^codex:\/\/threads\/([^/?#]+)$/i);
+  const threadId = match?.[1];
+  return isCodexThreadId(threadId) ? `codex://threads/${threadId}` : undefined;
+}
+
+function readPath(value: unknown, keys: string[]): unknown {
+  let current = value;
+  for (const key of keys) {
+    const record = asRecord(current);
+    if (!record) {
+      return undefined;
+    }
+    current = record[key];
+  }
+
+  return current;
+}
+
+function formatClipboardSession(session: SessionStatus): string {
+  return [
+    "Agent Status Light Session",
+    "",
+    `Project: ${session.projectName}`,
+    `Project path: ${session.projectPath || "unavailable"}`,
+    `Session: ${session.displayTitle || session.sessionName || session.title || session.sessionId}`,
+    `Session id: ${session.sessionId}`,
+    `Codex thread id: ${session.codexThreadId || "unavailable"}`,
+    `State: ${session.state}`,
+    `Message: ${session.message || ""}`,
+    `Updated at: ${new Date(session.updatedAt).toISOString()}`
+  ].join("\n");
+}
+
+async function openTarget(target: string): Promise<void> {
+  if (process.platform === "darwin") {
+    await execFileAsync("open", [target]);
+    return;
+  }
+
+  if (process.platform === "win32") {
+    await execFileAsync("cmd", ["/c", "start", "", target]);
+    return;
+  }
+
+  await execFileAsync("xdg-open", [target]);
+}
+
+async function openCodexDeepLink(
+  target: string,
+  bundleId: string,
+  appName: string
+): Promise<void> {
+  if (process.platform === "darwin") {
+    if (bundleId) {
+      await execFileAsync("open", ["-b", bundleId, target]);
+    } else {
+      await openTarget(target);
+    }
+
+    await activateCodexApp(appName, bundleId);
+    return;
+  }
+
+  await openTarget(target);
+}
+
+async function openCodexApp(appName: string, bundleId: string): Promise<boolean> {
+  try {
+    if (process.platform === "darwin") {
+      if (bundleId) {
+        await execFileAsync("open", ["-b", bundleId]);
+      } else {
+        await execFileAsync("open", ["-a", appName]);
+      }
+      await activateCodexApp(appName, bundleId);
+      return true;
+    }
+
+    await openTarget(appName);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function activateCodexApp(appName: string, bundleId: string): Promise<void> {
+  if (process.platform !== "darwin") {
+    return;
+  }
+
+  const script = bundleId
+    ? `tell application id "${escapeAppleScript(bundleId)}" to activate`
+    : `tell application "${escapeAppleScript(appName)}" to activate`;
+
+  try {
+    await execFileAsync("osascript", ["-e", script]);
+  } catch {
+    // Activation is a best-effort foreground hint. Opening still counts if it succeeded.
+  }
+}
+
+function escapeAppleScript(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+async function copyToClipboard(value: string): Promise<boolean> {
+  if (process.platform !== "darwin") {
+    return false;
+  }
+
+  return new Promise((resolve) => {
+    const child = spawn("pbcopy");
+    child.on("error", () => resolve(false));
+    child.on("close", (code) => resolve(code === 0));
+    child.stdin.end(value);
+  });
 }
 
 function text(value: unknown): string | undefined {

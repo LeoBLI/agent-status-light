@@ -10,9 +10,14 @@ const config = loadConfig();
 const store = new StatusStore({
   staleTimeoutMs: config.staleTimeoutMs,
   doneToIdleMs: config.doneToIdleMs,
+  codexAppName: config.codexAppName,
+  codexBundleId: config.codexBundleId,
   titleOverridesPath:
     process.env.SESSION_TITLE_OVERRIDES_PATH ||
-    path.join(process.cwd(), "session-title-overrides.json")
+    path.join(process.cwd(), "session-title-overrides.json"),
+  projectNameOverridesPath:
+    process.env.PROJECT_NAME_OVERRIDES_PATH ||
+    path.join(process.cwd(), "project-name-overrides.json")
 });
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 
@@ -45,6 +50,7 @@ if (!gotSingleInstanceLock) {
     ipcMain.handle("statuses:get", () => store.getStatuses());
     ipcMain.handle("diagnostics:get", () => store.getDiagnostics());
     ipcMain.handle("session:dismiss", (_event, id: string) => store.dismissSession(id).tree);
+    ipcMain.handle("session:open", (_event, id: string) => store.openSession(id));
     ipcMain.on("window:set-expanded", (_event, expanded: boolean) => {
       mainWindow?.setSize(360, expanded ? 520 : 260);
     });
@@ -201,6 +207,9 @@ function loadConfig(): AppConfig {
 
   return {
     port: numberFromEnv("STATUS_LIGHT_PORT", fileConfig.port ?? 8787),
+    codexAppName: process.env.CODEX_APP_NAME || fileConfig.codexAppName || "Codex",
+    codexBundleId:
+      process.env.CODEX_BUNDLE_ID || fileConfig.codexBundleId || "com.openai.codex",
     doneToIdleMs: numberFromEnv("DONE_TO_IDLE_MS", fileConfig.doneToIdleMs ?? 10 * 1000),
     staleTimeoutMs: numberFromEnv(
       "STALE_TIMEOUT_MS",

@@ -52,6 +52,18 @@ async function main() {
     console.log(`Stale timeout: ${diagnostics.autoTransitions.staleTimeoutMs}ms`);
   }
 
+  if (diagnostics.codexOpenSupport) {
+    console.log(`Codex app name: ${diagnostics.codexOpenSupport.appName}`);
+    console.log(`Codex bundle id: ${diagnostics.codexOpenSupport.bundleId || "unknown"}`);
+    console.log(`Codex deeplink scheme: ${diagnostics.codexOpenSupport.deeplinkScheme}`);
+    console.log(
+      `Codex session index: ${
+        diagnostics.codexOpenSupport.sessionIndexFound ? "found" : "missing"
+      }`
+    );
+    console.log(`Thread deeplink support: ${diagnostics.codexOpenSupport.threadDeepLinkSupport}`);
+  }
+
   console.log(`User hooks file: ${exists(userHooksPath) ? "found" : "missing"}`);
   console.log(`Project hooks file: ${exists(projectHooksPath) ? "found" : "missing"}`);
 

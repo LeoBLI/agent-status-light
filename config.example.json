@@ -1,5 +1,7 @@
 {
   "port": 8787,
+  "codexAppName": "Codex",
+  "codexBundleId": "com.openai.codex",
   "staleTimeoutMs": 600000,
   "doneToIdleMs": 10000,
   "enableSound": true,

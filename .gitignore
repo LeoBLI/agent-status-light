@@ -1,11 +1,12 @@
-cat > .gitignore <<'EOF'
 node_modules/
 dist/
 build/
 out/
 .env
 .env.local
-.DS_Store
+config.json
+session-title-overrides.json
+project-name-overrides.json
 logs/
 *.log
-EOF
+.DS_Store

@@ -8,6 +8,15 @@ export type AgentStatusSource =
   | "system"
   | "unknown";
 
+export type CodexOpenTargetType = "codex-thread" | "codex-app" | "unknown";
+
+export interface CodexOpenTarget {
+  type: CodexOpenTargetType;
+  url?: string;
+  appName?: string;
+  fallbackReason?: string;
+}
+
 export type SessionVisibility = "visible" | "dismissed";
 
 export interface SessionStatus {
@@ -31,6 +40,11 @@ export interface SessionStatus {
   dismissedAt?: number;
   lastCompletedAt?: number;
   lastApprovalAt?: number;
+  codexThreadId?: string;
+  codexSessionId?: string;
+  codexSessionPath?: string;
+  codexDeepLink?: string;
+  openTarget?: CodexOpenTarget;
   raw?: unknown;
 }
 
@@ -61,6 +75,16 @@ export interface StatusTree {
   projects: ProjectStatus[];
 }
 
+export interface OpenSessionResult {
+  ok: boolean;
+  opened: boolean;
+  strategy: "deeplink" | "open-app" | "failed";
+  target?: string;
+  fallbackUsed: boolean;
+  copiedToClipboard: boolean;
+  message: string;
+}
+
 export interface StatusUpdateInput {
   agent?: string;
   project?: string;
@@ -76,6 +100,10 @@ export interface StatusUpdateInput {
   state?: AgentState;
   source?: AgentStatusSource;
   message?: string;
+  codexThreadId?: string;
+  codexSessionId?: string;
+  codexSessionPath?: string;
+  codexDeepLink?: string;
   raw?: unknown;
 }
 
@@ -95,10 +123,20 @@ export interface Diagnostics {
     doneDisplayMs: number;
     staleTimeoutMs: number;
   };
+  codexOpenSupport: {
+    appName: string;
+    bundleId: string;
+    deeplinkScheme: "codex://";
+    sessionIndexFound: boolean;
+    sessionIndexPath: string;
+    threadDeepLinkSupport: "best-effort";
+  };
 }
 
 export interface AppConfig {
   port: number;
+  codexAppName: string;
+  codexBundleId: string;
   staleTimeoutMs: number;
   doneToIdleMs: number;
   enableSound: boolean;

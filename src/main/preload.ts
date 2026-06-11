@@ -1,11 +1,12 @@
 import { contextBridge, ipcRenderer } from "electron";
-import { Diagnostics, OverallStatus, StatusTree } from "../shared/types";
+import { Diagnostics, OpenSessionResult, OverallStatus, StatusTree } from "../shared/types";
 
 contextBridge.exposeInMainWorld("agentStatus", {
   getStatus: (): Promise<OverallStatus> => ipcRenderer.invoke("status:get"),
   getStatuses: (): Promise<StatusTree> => ipcRenderer.invoke("statuses:get"),
   getDiagnostics: (): Promise<Diagnostics> => ipcRenderer.invoke("diagnostics:get"),
   dismissSession: (id: string): Promise<StatusTree> => ipcRenderer.invoke("session:dismiss", id),
+  openSession: (id: string): Promise<OpenSessionResult> => ipcRenderer.invoke("session:open", id),
   setExpanded: (expanded: boolean): void => {
     ipcRenderer.send("window:set-expanded", expanded);
   },

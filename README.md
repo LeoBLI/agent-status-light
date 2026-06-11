@@ -21,6 +21,7 @@ Electron floating light
 - Frameless, always-on-top floating window.
 - Status v2 display: gray `idle`, green `running`, flashing red `waiting_approval`, blue/cyan `done`, orange `error`, purple slow-flashing `stale`.
 - Click the window to expand or collapse status and hook-health details.
+- Open a visible session in Codex with best-effort `codex://` deeplink support and app fallback.
 - Desktop notification and terminal bell when approval is needed.
 - Optional WLED/ESP32 HTTP integration.
 
@@ -114,7 +115,9 @@ node scripts/diagnose.js
   "state": "waiting_approval",
   "source": "manual",
   "message": "Codex needs approval",
-  "project": "optional project name"
+  "project": "optional project name",
+  "codexThreadId": "optional Codex thread id",
+  "codexSessionId": "optional Codex session id"
 }
 ```
 
@@ -172,11 +175,36 @@ Returns recent in-memory status events. The service keeps the latest 200 events.
     "lastHookState": "waiting_approval",
     "isHookRecentlyActive": true
   },
-  "eventsCount": 12
+  "eventsCount": 12,
+  "codexOpenSupport": {
+    "appName": "Codex",
+    "bundleId": "com.openai.codex",
+    "deeplinkScheme": "codex://",
+    "sessionIndexFound": true,
+    "sessionIndexPath": "/Users/you/.codex/session_index.jsonl",
+    "threadDeepLinkSupport": "best-effort"
+  }
 }
 ```
 
 `isHookRecentlyActive` is true when a `source: "codex-hook"` event arrived in the last 10 minutes.
+
+### `POST /open-session`
+
+Attempts to open a visible session in Codex:
+
+```bash
+curl -s -X POST http://localhost:8787/open-session \
+  -H "Content-Type: application/json" \
+  -d '{"id":"/Users/leoclaw/Documents/AgentLight/agent-status-light::open-fallback-test"}'
+```
+
+Behavior:
+
+- If the session has a trusted `codexThreadId`, the service tries `codex://threads/<codexThreadId>`.
+- If no thread deeplink is available, it falls back to opening the Codex app.
+- Session details are copied to the clipboard either way.
+- This endpoint does not change the session state.
 
 ## Status v2
 
@@ -209,6 +237,60 @@ curl -s -X POST http://localhost:8787/status \
 ```
 
 The session should show `Done` and remain visible until dismissed.
+
+## Open in Codex
+
+In the expanded Agent Status Light panel, click a visible session row or its `Open` button to return to Codex.
+
+When clicked, Agent Status Light tries this sequence:
+
+1. If the session has a valid `codexThreadId`, open `codex://threads/<codexThreadId>`.
+2. If the session does not have a usable deeplink, open the Codex app by bundle id (`com.openai.codex`) or app name.
+3. Ask macOS to activate Codex so it is brought to the foreground.
+4. Copy the session details to the clipboard so you can identify or search for the session manually.
+
+Clipboard content:
+
+```text
+Agent Status Light Session
+
+Project: <projectName>
+Project path: <projectPath>
+Session: <displayTitle>
+Session id: <sessionId>
+Codex thread id: <codexThreadId or unavailable>
+State: <state>
+Message: <message>
+Updated at: <updatedAt>
+```
+
+This feature is best-effort. It does not use macOS Accessibility automation, does not simulate mouse clicks, and does not depend on the Codex window layout. Because of that, it does not guarantee that Codex will focus the exact input box for a thread. Exact thread focusing depends on Codex Desktop accepting the `codex://threads/<id>` deeplink.
+
+Configure the app name if needed:
+
+```bash
+CODEX_APP_NAME="Codex" CODEX_BUNDLE_ID="com.openai.codex" npm run dev
+```
+
+Test a session with a thread deeplink:
+
+```bash
+curl -s -X POST http://localhost:8787/status \
+  -H "Content-Type: application/json" \
+  -d '{"agent":"codex","projectPath":"/Users/leoclaw/Documents/AgentLight/agent-status-light","projectName":"agent-status-light","sessionId":"open-test","title":"Open in Codex 测试","state":"done","source":"manual","message":"Ready to open","codexThreadId":"00000000-0000-0000-0000-000000000000","codexDeepLink":"codex://threads/00000000-0000-0000-0000-000000000000"}'
+```
+
+Test fallback without a thread id:
+
+```bash
+curl -s -X POST http://localhost:8787/status \
+  -H "Content-Type: application/json" \
+  -d '{"agent":"codex","projectPath":"/Users/leoclaw/Documents/AgentLight/agent-status-light","projectName":"agent-status-light","sessionId":"open-fallback-test","title":"Open fallback 测试","state":"waiting_approval","source":"manual","message":"Needs approval"}'
+
+curl -s -X POST http://localhost:8787/open-session \
+  -H "Content-Type: application/json" \
+  -d '{"id":"/Users/leoclaw/Documents/AgentLight/agent-status-light::open-fallback-test"}'
+```
 
 Test `stale` quickly:
 
@@ -326,6 +408,16 @@ curl -s -X POST http://localhost:8787/session-title \
 Later hook events that do not contain a title preserve the corrected title.
 Title corrections are saved in `session-title-overrides.json` and survive app restarts. Do not copy a title from another project into a default session id; Codex Desktop may not expose the real title in hook payloads.
 
+Correct a project display name when the Codex UI name differs from the local folder name:
+
+```bash
+curl -s -X POST http://localhost:8787/project-name \
+  -H "Content-Type: application/json" \
+  -d '{"projectId":"/Users/leoclaw/00_agent-runtime-bridge","projectName":"AI conversation localizer"}'
+```
+
+Project identity still uses `projectId` / `projectPath`; this only changes the displayed name. Corrections are saved in `project-name-overrides.json` and survive app restarts.
+
 Dismiss a project:
 
 ```bash
@@ -408,9 +500,12 @@ Codex hook reporter project/session extraction:
 - `projectPath` comes from hook stdin `cwd` when available.
 - `projectName` is the last path segment of `cwd`.
 - `sessionId` uses `session_id`, `sessionId`, `thread_id`, `threadId`, `conversation_id`, or `conversationId`.
+- `codexSessionId` keeps the raw Codex session-like id when available.
+- `codexThreadId` is only filled from trusted id fields when the value itself looks like a UUID. Priority is `session_meta.payload.id`, then `thread_id` / `threadId`, then `session_id` / `sessionId`, then `conversation_id` / `conversationId`.
+- `codexDeepLink` is generated as `codex://threads/<codexThreadId>` only when `codexThreadId` is valid.
 - If no stable id exists, it falls back to a default session id derived from `cwd`.
 
-Current limitation: if a Codex hook payload does not provide a real session/thread/conversation id, multiple same-project Codex sessions may still collapse into the same fallback `default-session`. The model is ready for stable ids when Codex provides them.
+Current limitation: if a Codex hook payload does not provide a real session/thread/conversation id, multiple same-project Codex sessions may still collapse into the same fallback `default-session`. The model is ready for stable ids when Codex provides them. Agent Status Light does not treat full local session filenames as thread ids.
 
 ## Diagnostics
 
@@ -517,14 +612,16 @@ Current validation:
 - `PermissionRequest` can update Agent Status Light to `waiting_approval` with `source: "codex-hook"`.
 - `Stop` maps to `done`, not `idle`, so you can see that the previous task just completed before the light returns to idle automatically.
 
-Codex Desktop App may behave differently in some versions or surfaces. It may not execute `~/.codex/hooks.json` command hooks, or it may not display the same hook trust flow. If Desktop does not turn the light red, that is not necessarily an Agent Status Light service problem.
+Codex Desktop App supports command hooks in current testing, but each project or surface may require a hook review/trust flow before the commands run. If Desktop does not turn the light red, first open the hooks configuration UI and confirm the five hooks are enabled: `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, and `Stop`.
 
 Recommended workflow:
 
 1. Verify the hook chain with Codex CLI first.
 2. Run `node scripts/diagnose.js` to confirm whether recent `codex-hook` events are arriving.
-3. If Desktop does not trigger hooks, use Codex CLI for hook-based status updates for now.
-4. Add or enable a future fallback monitor, such as `codex-desktop-monitor` or `browser-monitor`, when Desktop hook support is unavailable.
+3. If Desktop does not trigger hooks, review/trust the hooks in that project and start a new conversation if needed.
+4. Add or enable a future fallback monitor, such as `codex-desktop-monitor` or `browser-monitor`, if a surface still does not emit hooks.
+
+Internal Codex tasks can also emit hooks. By default, `scripts/codex-hook-reporter.js` ignores `~/.codex/memories`, so the internal memory writing agent does not appear as a user project named `memories`. To customize ignored paths, set `AGENT_STATUS_LIGHT_IGNORE_PATHS` to a path-delimited list.
 
 ## Configuration
 
@@ -539,6 +636,8 @@ Supported fields:
 ```json
 {
   "port": 8787,
+  "codexAppName": "Codex",
+  "codexBundleId": "com.openai.codex",
   "staleTimeoutMs": 600000,
   "enableSound": true,
   "enableNotifications": true,

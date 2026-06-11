@@ -28,6 +28,16 @@ interface SessionStatus {
   dismissedAt?: number;
   lastCompletedAt?: number;
   lastApprovalAt?: number;
+  codexThreadId?: string;
+  codexSessionId?: string;
+  codexSessionPath?: string;
+  codexDeepLink?: string;
+  openTarget?: {
+    type: "codex-thread" | "codex-app" | "unknown";
+    url?: string;
+    appName?: string;
+    fallbackReason?: string;
+  };
 }
 
 interface ProjectStatus {
@@ -57,6 +67,16 @@ interface StatusTree {
   projects: ProjectStatus[];
 }
 
+interface OpenSessionResult {
+  ok: boolean;
+  opened: boolean;
+  strategy: "deeplink" | "open-app" | "failed";
+  target?: string;
+  fallbackUsed: boolean;
+  copiedToClipboard: boolean;
+  message: string;
+}
+
 const root = document.querySelector<HTMLElement>("#app");
 const toggle = document.querySelector<HTMLButtonElement>("#toggle");
 const overallLight = document.querySelector<HTMLElement>("#overallLight");
@@ -67,6 +87,7 @@ const statusApi = (window as unknown as {
   agentStatus: {
     getStatuses: () => Promise<StatusTree>;
     dismissSession: (id: string) => Promise<StatusTree>;
+    openSession: (id: string) => Promise<OpenSessionResult>;
     setExpanded: (expanded: boolean) => void;
     onStatuses: (callback: (tree: StatusTree) => void) => () => void;
   };
@@ -74,6 +95,8 @@ const statusApi = (window as unknown as {
 
 let expanded = false;
 let currentTree: StatusTree | undefined;
+let transientMessage: string | undefined;
+let transientMessageTimer: number | undefined;
 
 document.addEventListener("DOMContentLoaded", async () => {
   root?.addEventListener("click", (event) => {
@@ -128,7 +151,7 @@ function render(tree: StatusTree): void {
   }
 
   if (overallMessage) {
-    overallMessage.textContent = summaryText(tree.overall);
+    overallMessage.textContent = transientMessage || summaryText(tree.overall);
   }
 
   if (!treeEl) {
@@ -181,6 +204,11 @@ function sessionNode(session: SessionStatus): HTMLElement {
   const row = document.createElement("article");
   row.className = "row session-row";
   row.dataset.state = session.state;
+  row.title = openTitle(session);
+  row.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    await openSession(session);
+  });
 
   const light = document.createElement("span");
   light.className = "mini-light";
@@ -201,6 +229,17 @@ function sessionNode(session: SessionStatus): HTMLElement {
 
   row.append(light, main);
 
+  const open = document.createElement("button");
+  open.className = "open-session";
+  open.type = "button";
+  open.textContent = "Open";
+  open.title = openTitle(session);
+  open.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    await openSession(session, open);
+  });
+  row.append(open);
+
   const dismiss = document.createElement("button");
   dismiss.className = "dismiss";
   dismiss.type = "button";
@@ -212,6 +251,24 @@ function sessionNode(session: SessionStatus): HTMLElement {
   row.append(dismiss);
 
   return row;
+}
+
+async function openSession(session: SessionStatus, button?: HTMLButtonElement): Promise<void> {
+  if (button) {
+    button.disabled = true;
+  }
+
+  setTransientMessage("Opening Codex...");
+  try {
+    const result = await statusApi.openSession(session.id);
+    setTransientMessage(resultMessage(result));
+  } catch {
+    setTransientMessage("Could not open Codex. Session info copied if available.");
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
+  }
 }
 
 function emptyNode(): HTMLElement {
@@ -262,6 +319,45 @@ function sessionMeta(session: SessionStatus): string {
   return `${stateLabel(session.state)} · ${formatDuration(Date.now() - session.updatedAt)}${
     session.message ? ` · ${session.message}` : ""
   }`;
+}
+
+function openTitle(session: SessionStatus): string {
+  if (session.codexDeepLink) {
+    return `Open Codex thread: ${session.codexDeepLink}`;
+  }
+
+  return "Open Codex app and copy session info";
+}
+
+function resultMessage(result: OpenSessionResult): string {
+  if (result.strategy === "deeplink" && result.opened) {
+    return "Opening Codex thread...";
+  }
+
+  if (result.strategy === "open-app" && result.opened) {
+    return "Opened Codex app. Session info copied.";
+  }
+
+  return "Could not open Codex. Session info copied.";
+}
+
+function setTransientMessage(message: string): void {
+  transientMessage = message;
+
+  if (transientMessageTimer) {
+    window.clearTimeout(transientMessageTimer);
+  }
+
+  transientMessageTimer = window.setTimeout(() => {
+    transientMessage = undefined;
+    if (currentTree) {
+      render(currentTree);
+    }
+  }, 5000);
+
+  if (currentTree) {
+    render(currentTree);
+  }
 }
 
 function formatAgo(ms: number): string {

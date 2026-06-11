@@ -18,6 +18,7 @@ main().catch((error) => {
 
 async function main() {
   const stdin = await readStdin();
+  const parsed = parseJson(stdin);
   if (stdin.includes('"hook_event_name"') && stdin.includes('"Stop"')) {
     state = "done";
     message = "Codex finished";
@@ -28,7 +29,13 @@ async function main() {
     state,
     source: "codex-hook",
     message,
-    project
+    project,
+    codexSessionId: extractCodexSessionId(parsed),
+    codexThreadId: extractCodexThreadId(parsed),
+    codexDeepLink: extractCodexThreadId(parsed)
+      ? `codex://threads/${extractCodexThreadId(parsed)}`
+      : undefined,
+    raw: parsed || undefined
   };
 
   appendLog(`hook invoked state=${state} message=${JSON.stringify(message)} cwd=${process.cwd()}`);
@@ -40,6 +47,67 @@ async function main() {
     const message = error instanceof Error ? error.message : String(error);
     appendLog(`status update failed error=${message}`);
   }
+}
+
+function parseJson(raw) {
+  if (!raw.trim()) {
+    return undefined;
+  }
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    appendLog("legacy hook stdin was not valid JSON");
+    return undefined;
+  }
+}
+
+function extractCodexThreadId(parsed) {
+  const candidates = [
+    text(readPath(parsed, ["session_meta", "payload", "id"])),
+    text(parsed?.thread_id),
+    text(parsed?.threadId),
+    text(parsed?.session_id),
+    text(parsed?.sessionId),
+    text(parsed?.conversation_id),
+    text(parsed?.conversationId)
+  ];
+
+  return candidates.find(isUuid);
+}
+
+function extractCodexSessionId(parsed) {
+  return (
+    text(parsed?.session_id) ||
+    text(parsed?.sessionId) ||
+    text(parsed?.thread_id) ||
+    text(parsed?.threadId) ||
+    text(parsed?.conversation_id) ||
+    text(parsed?.conversationId)
+  );
+}
+
+function text(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function isUuid(value) {
+  return (
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+  );
+}
+
+function readPath(value, keys) {
+  let current = value;
+  for (const key of keys) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) {
+      return undefined;
+    }
+    current = current[key];
+  }
+
+  return current;
 }
 
 function readStdin() {
