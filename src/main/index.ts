@@ -1,10 +1,22 @@
-import { app, BrowserWindow, dialog, ipcMain, Notification } from "electron";
+import {
+  app,
+  BrowserWindow,
+  Menu,
+  Notification,
+  Tray,
+  dialog,
+  ipcMain,
+  nativeImage,
+  shell
+} from "electron";
 import path from "node:path";
 import { readFileSync } from "node:fs";
 import { AgentState, AppConfig, SessionStatus, StatusTree } from "../shared/types";
 import { startStatusServer, StatusStore } from "./status-server";
 
 let mainWindow: BrowserWindow | undefined;
+let tray: Tray | undefined;
+let isQuitting = false;
 
 const config = loadConfig();
 const store = new StatusStore({
@@ -25,20 +37,14 @@ if (!gotSingleInstanceLock) {
   app.quit();
 } else {
   app.on("second-instance", () => {
-    if (!mainWindow) {
-      return;
-    }
-
-    if (mainWindow.isMinimized()) {
-      mainWindow.restore();
-    }
-
-    mainWindow.show();
-    mainWindow.focus();
+    showPanel();
   });
 
   app.whenReady().then(async () => {
+    app.setName("AgentWatch");
     createWindow();
+    createTray();
+    createApplicationMenu();
 
     try {
       await startStatusServer(config, store);
@@ -51,6 +57,10 @@ if (!gotSingleInstanceLock) {
     ipcMain.handle("diagnostics:get", () => store.getDiagnostics());
     ipcMain.handle("session:dismiss", (_event, id: string) => store.dismissSession(id).tree);
     ipcMain.handle("session:open", (_event, id: string) => store.openSession(id));
+    ipcMain.on("window:hide", () => {
+      mainWindow?.hide();
+      updateTray(store.getStatus().state);
+    });
     ipcMain.on("window:set-expanded", (_event, expanded: boolean) => {
       mainWindow?.setSize(360, expanded ? 520 : 260);
     });
@@ -58,19 +68,28 @@ if (!gotSingleInstanceLock) {
     store.on("status", (tree, session, previous) => {
       mainWindow?.webContents.send("statuses:update", tree);
       mainWindow?.webContents.send("status:update", tree.overall);
+      updateTray(tree.overall.state);
       handleSideEffects(tree, session, previous);
     });
 
+    updateTray(store.getStatus().state);
+
     app.on("activate", () => {
-      if (BrowserWindow.getAllWindows().length === 0) {
+      if (!mainWindow) {
         createWindow();
       }
+
+      showPanel();
     });
   });
 }
 
+app.on("before-quit", () => {
+  isQuitting = true;
+});
+
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") {
+  if (process.platform !== "darwin" && isQuitting) {
     app.quit();
   }
 });
@@ -79,6 +98,7 @@ function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 220,
     height: 260,
+    title: "AgentWatch",
     minWidth: 280,
     minHeight: 76,
     maxWidth: 520,
@@ -96,8 +116,210 @@ function createWindow(): void {
     }
   });
 
+  mainWindow.on("close", (event) => {
+    if (!isQuitting) {
+      event.preventDefault();
+      mainWindow?.hide();
+      updateTray(store.getStatus().state);
+    }
+  });
+
   mainWindow.setAlwaysOnTop(true, "floating");
   mainWindow.loadFile(path.join(__dirname, "../renderer/index.html"));
+}
+
+function createTray(): void {
+  tray = new Tray(loadTrayIcon("idle"));
+  tray.setToolTip("AgentWatch · Idle");
+  tray.on("click", togglePanel);
+  updateTray(store.getStatus().state);
+}
+
+function togglePanel(): void {
+  if (mainWindow?.isVisible()) {
+    mainWindow.hide();
+    updateTray(store.getStatus().state);
+    return;
+  }
+
+  showPanel();
+}
+
+function showPanel(): void {
+  if (!mainWindow) {
+    createWindow();
+  }
+
+  if (mainWindow?.isMinimized()) {
+    mainWindow.restore();
+  }
+
+  mainWindow?.setAlwaysOnTop(true, "floating");
+  mainWindow?.show();
+  mainWindow?.focus();
+  updateTray(store.getStatus().state);
+}
+
+function createApplicationMenu(): void {
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      {
+        label: "AgentWatch",
+        submenu: [
+          {
+            label: "Show Panel",
+            click: showPanel
+          },
+          {
+            label: "Open Diagnostics",
+            click: () => {
+              void shell.openExternal(`http://localhost:${config.port}/diagnostics`);
+            }
+          },
+          { type: "separator" },
+          {
+            label: "Quit AgentWatch",
+            accelerator: "Command+Q",
+            click: () => {
+              isQuitting = true;
+              app.quit();
+            }
+          }
+        ]
+      },
+      {
+        label: "Edit",
+        submenu: [
+          { role: "undo" },
+          { role: "redo" },
+          { type: "separator" },
+          { role: "cut" },
+          { role: "copy" },
+          { role: "paste" },
+          { role: "selectAll" }
+        ]
+      }
+    ])
+  );
+}
+
+function updateTray(state: AgentState): void {
+  if (!tray) {
+    return;
+  }
+
+  try {
+    const safeState = state || "idle";
+    const icon = loadTrayIcon(safeState);
+    if (!icon.isEmpty()) {
+      tray.setImage(icon);
+    }
+    tray.setToolTip(`AgentWatch · ${stateLabel(safeState)}`);
+    tray.setContextMenu(buildTrayMenu());
+  } catch (error) {
+    console.warn("Failed to update AgentWatch tray icon:", error);
+  }
+}
+
+function buildTrayMenu(): Menu {
+  const panelVisible = Boolean(mainWindow?.isVisible());
+  const loginSettings = app.getLoginItemSettings();
+
+  return Menu.buildFromTemplate([
+    {
+      label: panelVisible ? "Hide Panel" : "Show Panel",
+      click: togglePanel
+    },
+    {
+      label: "Open Diagnostics",
+      click: () => {
+        void shell.openExternal(`http://localhost:${config.port}/diagnostics`);
+      }
+    },
+    {
+      label: "Clear Done Sessions",
+      click: () => {
+        store.clearDone();
+        updateTray(store.getStatus().state);
+      }
+    },
+    { type: "separator" },
+    {
+      label: "Launch at Login",
+      type: "checkbox",
+      checked: loginSettings.openAtLogin,
+      click: (menuItem) => {
+        app.setLoginItemSettings({ openAtLogin: menuItem.checked });
+      }
+    },
+    { type: "separator" },
+    {
+      label: "Quit AgentWatch",
+      click: () => {
+        isQuitting = true;
+        app.quit();
+      }
+    }
+  ]);
+}
+
+function trayIconPath(state: AgentState): string {
+  const fileName = `tray-${trayIconName(state)}.png`;
+  const candidates = [
+    path.join(process.cwd(), "assets", "tray", fileName),
+    path.join(app.getAppPath(), "assets", "tray", fileName),
+    path.join(process.resourcesPath, "assets", "tray", fileName)
+  ];
+
+  return (
+    candidates.find((candidate) => nativeImage.createFromPath(candidate).isEmpty() === false) ??
+    candidates[0]
+  );
+}
+
+function loadTrayIcon(state: AgentState): Electron.NativeImage {
+  try {
+    const icon = nativeImage.createFromPath(trayIconPath(state));
+    return icon.isEmpty() ? nativeImage.createEmpty() : icon.resize({ width: 18, height: 18 });
+  } catch {
+    return nativeImage.createEmpty();
+  }
+}
+
+function trayIconName(state: AgentState): string {
+  switch (state) {
+    case "waiting_approval":
+      return "approval";
+    case "running":
+      return "running";
+    case "done":
+      return "done";
+    case "error":
+      return "error";
+    case "stale":
+      return "stale";
+    case "idle":
+    default:
+      return "idle";
+  }
+}
+
+function stateLabel(state: AgentState): string {
+  switch (state) {
+    case "running":
+      return "Running";
+    case "waiting_approval":
+      return "Approval Required";
+    case "done":
+      return "Done";
+    case "error":
+      return "Error";
+    case "stale":
+      return "Stale";
+    case "idle":
+    default:
+      return "Idle";
+  }
 }
 
 function handleServerStartError(error: unknown): void {
@@ -112,10 +334,10 @@ function handleServerStartError(error: unknown): void {
 
     void dialog.showMessageBox({
       type: "warning",
-      title: "Agent Status Light",
+      title: "AgentWatch",
       message: `Port ${config.port} is already in use.`,
       detail:
-        "Another Agent Status Light instance or another local service is already listening on this port. Close the existing app, or set STATUS_LIGHT_PORT / config.json to another port."
+        "Another AgentWatch instance or another local service is already listening on this port. Close the existing app, or set STATUS_LIGHT_PORT / config.json to another port."
     });
     return;
   }
@@ -127,7 +349,7 @@ function handleServerStartError(error: unknown): void {
   });
 
   void dialog.showErrorBox(
-    "Agent Status Light",
+    "AgentWatch",
     error instanceof Error ? error.message : "Failed to start status server"
   );
 }

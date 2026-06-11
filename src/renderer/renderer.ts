@@ -73,12 +73,12 @@ interface OpenSessionResult {
   strategy: "deeplink" | "open-app" | "failed";
   target?: string;
   fallbackUsed: boolean;
-  copiedToClipboard: boolean;
   message: string;
 }
 
 const root = document.querySelector<HTMLElement>("#app");
 const toggle = document.querySelector<HTMLButtonElement>("#toggle");
+const hideWindow = document.querySelector<HTMLButtonElement>("#hideWindow");
 const overallLight = document.querySelector<HTMLElement>("#overallLight");
 const overallLabel = document.querySelector<HTMLElement>("#overallLabel");
 const overallMessage = document.querySelector<HTMLElement>("#overallMessage");
@@ -88,6 +88,7 @@ const statusApi = (window as unknown as {
     getStatuses: () => Promise<StatusTree>;
     dismissSession: (id: string) => Promise<StatusTree>;
     openSession: (id: string) => Promise<OpenSessionResult>;
+    hideWindow: () => void;
     setExpanded: (expanded: boolean) => void;
     onStatuses: (callback: (tree: StatusTree) => void) => () => void;
   };
@@ -110,6 +111,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   toggle?.addEventListener("click", (event) => {
     event.stopPropagation();
     toggleExpanded();
+  });
+
+  hideWindow?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    statusApi.hideWindow();
   });
 
   statusApi.onStatuses(render);
@@ -263,7 +269,7 @@ async function openSession(session: SessionStatus, button?: HTMLButtonElement): 
     const result = await statusApi.openSession(session.id);
     setTransientMessage(resultMessage(result));
   } catch {
-    setTransientMessage("Could not open Codex. Session info copied if available.");
+    setTransientMessage("Could not open Codex.");
   } finally {
     if (button) {
       button.disabled = false;
@@ -335,10 +341,10 @@ function resultMessage(result: OpenSessionResult): string {
   }
 
   if (result.strategy === "open-app" && result.opened) {
-    return "Opened Codex app. Session info copied.";
+    return "Opened Codex app.";
   }
 
-  return "Could not open Codex. Session info copied.";
+  return "Could not open Codex.";
 }
 
 function setTransientMessage(message: string): void {

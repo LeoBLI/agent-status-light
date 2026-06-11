@@ -3,14 +3,17 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Agent Status Light</title>
+    <title>AgentWatch</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body data-state="idle">
-    <main id="app" class="shell" role="button" tabindex="0" aria-label="Agent status light">
+    <main id="app" class="shell" role="button" tabindex="0" aria-label="AgentWatch">
       <header class="titlebar">
-        <span>Agent Status Light</span>
-        <button id="toggle" type="button">Expand</button>
+        <span>AgentWatch</span>
+        <div class="title-actions">
+          <button id="toggle" type="button">Expand</button>
+          <button id="hideWindow" type="button" title="Hide AgentWatch">Hide</button>
+        </div>
       </header>
       <section class="overall">
         <div id="overallLight" class="light" aria-label="Idle"></div>

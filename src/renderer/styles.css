@@ -54,6 +54,11 @@ button {
   font-weight: 700;
 }
 
+.title-actions {
+  display: flex;
+  gap: 5px;
+}
+
 .titlebar button {
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 6px;

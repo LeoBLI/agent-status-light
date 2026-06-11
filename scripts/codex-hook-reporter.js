@@ -11,7 +11,7 @@ const message = messageParts.join(" ") || defaultMessage(state);
 const port = Number(process.env.STATUS_LIGHT_PORT || 8787);
 const logPath =
   process.env.AGENT_STATUS_LIGHT_HOOK_LOG ||
-  "/Users/leoclaw/Documents/AgentLight/agent-status-light/logs/codex-hook.log";
+  "/Users/leoclaw/Projects/agent-status-light/logs/codex-hook.log";
 
 main().catch((error) => {
   appendLog(`reporter unexpected error=${error instanceof Error ? error.message : String(error)}`);
@@ -270,7 +270,7 @@ function postStatus(body) {
     );
 
     request.on("timeout", () => {
-      request.destroy(new Error("Timed out connecting to Agent Status Light"));
+      request.destroy(new Error("Timed out connecting to AgentWatch"));
     });
     request.on("error", reject);
     request.end(data);

@@ -7,6 +7,9 @@ contextBridge.exposeInMainWorld("agentStatus", {
   getDiagnostics: (): Promise<Diagnostics> => ipcRenderer.invoke("diagnostics:get"),
   dismissSession: (id: string): Promise<StatusTree> => ipcRenderer.invoke("session:dismiss", id),
   openSession: (id: string): Promise<OpenSessionResult> => ipcRenderer.invoke("session:open", id),
+  hideWindow: (): void => {
+    ipcRenderer.send("window:hide");
+  },
   setExpanded: (expanded: boolean): void => {
     ipcRenderer.send("window:set-expanded", expanded);
   },

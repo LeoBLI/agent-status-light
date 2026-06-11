@@ -1,10 +1,12 @@
 {
-  "name": "agent-status-light",
-  "version": "0.1.0",
-  "description": "Local desktop status light for Codex approval states.",
+  "name": "agentwatch",
+  "productName": "AgentWatch",
+  "version": "0.3.0",
+  "description": "AgentWatch watches your AI agent sessions and alerts you when they need attention.",
   "main": "dist/main/index.js",
   "scripts": {
-    "build": "node --max-old-space-size=256 ./node_modules/typescript/bin/tsc && npm run copy-renderer",
+    "generate-tray-icons": "node scripts/generate-tray-icons.js",
+    "build": "npm run generate-tray-icons && node --max-old-space-size=256 ./node_modules/typescript/bin/tsc && npm run copy-renderer",
     "copy-renderer": "mkdir -p dist/renderer && cp src/renderer/index.html src/renderer/styles.css dist/renderer/",
     "prepare-electron": "node scripts/prepare-electron-dev.js",
     "dev": "npm run build && npm run prepare-electron && /private/tmp/agent-status-light-electron/Electron.app/Contents/MacOS/Electron .",
@@ -15,17 +17,40 @@
     "status:running": "curl -s -X POST http://localhost:8787/status -H 'Content-Type: application/json' -d '{\"agent\":\"codex\",\"state\":\"running\",\"message\":\"Codex is running\"}'",
     "status:idle": "curl -s -X POST http://localhost:8787/status -H 'Content-Type: application/json' -d '{\"agent\":\"codex\",\"state\":\"idle\",\"message\":\"Codex is idle\"}'",
     "diagnose": "node scripts/diagnose.js",
-    "typecheck": "node --max-old-space-size=256 ./node_modules/typescript/bin/tsc --noEmit"
+    "typecheck": "node --max-old-space-size=256 ./node_modules/typescript/bin/tsc --noEmit",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder"
   },
   "keywords": [
     "codex",
     "electron",
+    "agentwatch",
     "status-light"
   ],
   "license": "MIT",
+  "build": {
+    "appId": "com.leoclaw.agentwatch",
+    "productName": "AgentWatch",
+    "files": [
+      "dist/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "directories": {
+      "output": "release"
+    }
+  },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "electron": "^35.7.5",
+    "electron-builder": "^26.0.12",
     "typescript": "^5.8.0"
   }
 }

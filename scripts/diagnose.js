@@ -16,7 +16,7 @@ main().catch((error) => {
 });
 
 async function main() {
-  console.log("Agent Status Light Diagnostics\n");
+  console.log("AgentWatch Diagnostics\n");
 
   const health = await getJson("/health").catch((error) => ({ error }));
   const status = await getJson("/status").catch((error) => ({ error }));
@@ -133,7 +133,7 @@ function recommendations(serviceOk, diagnosticsOk, diagnostics, hookHealth) {
 
   if (!["v2", "v3-hierarchical"].includes(diagnostics.statusVersion)) {
     return [
-      "This service does not report a current status version. An older Agent Status Light process is probably still running.",
+      "This service does not report a current status version. An older AgentWatch process is probably still running.",
       "Quit the floating window completely, then run npm run dev again."
     ];
   }

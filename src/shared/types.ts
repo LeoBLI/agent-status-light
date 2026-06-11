@@ -81,7 +81,6 @@ export interface OpenSessionResult {
   strategy: "deeplink" | "open-app" | "failed";
   target?: string;
   fallbackUsed: boolean;
-  copiedToClipboard: boolean;
   message: string;
 }
 
@@ -115,6 +114,7 @@ export interface HookHealth {
 
 export interface Diagnostics {
   ok: true;
+  serviceName: "AgentWatch";
   statusVersion: "v3-hierarchical";
   currentStatus: OverallStatus;
   hookHealth: HookHealth;

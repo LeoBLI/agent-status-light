@@ -1,7 +1,10 @@
-Status: v0.1.0 — working local MVP for Codex CLI/Desktop hooks.
-# Agent Status Light
+# AgentWatch
 
-Agent Status Light is a local desktop status light for Codex. It accepts status updates from multiple signal sources, serves a unified status API on `http://localhost:8787`, and shows a small always-on-top Electron floating window.
+Keep an eye on your agents.
+
+AgentWatch is a desktop companion that watches your AI agent sessions, alerts you when they need attention, and helps you return to the right task.
+
+Status: v0.3.0 — macOS menu bar app shell for Codex CLI/Desktop hooks.
 
 ```text
 Signal Sources
@@ -12,13 +15,14 @@ Signal Sources
         ↓
 Unified status service
         ↓
-Electron floating light
+Electron floating panel + macOS menu bar icon
 ```
 
 ## Features
 
 - Local HTTP status service with `GET /status`, `POST /status`, `GET /events`, and `GET /diagnostics`.
-- Frameless, always-on-top floating window.
+- macOS menu bar status icon with show/hide controls.
+- Frameless, always-on-top floating panel.
 - Status v2 display: gray `idle`, green `running`, flashing red `waiting_approval`, blue/cyan `done`, orange `error`, purple slow-flashing `stale`.
 - Click the window to expand or collapse status and hook-health details.
 - Open a visible session in Codex with best-effort `codex://` deeplink support and app fallback.
@@ -28,7 +32,7 @@ Electron floating light
 ## Install
 
 ```bash
-cd /Users/leoclaw/Documents/AgentLight/agent-status-light
+cd /Users/leoclaw/Projects/agent-status-light
 npm install
 ```
 
@@ -49,6 +53,45 @@ For HTTP-only troubleshooting without opening the Electron window:
 ```bash
 npm run dev:server
 ```
+
+## AgentWatch v0.3: macOS Menu Bar App
+
+AgentWatch v0.3 moves the tool from a CLI-launched floating utility toward a resident macOS companion app.
+
+The menu bar icon mirrors the overall state:
+
+- Gray: `idle`
+- Green: `running`
+- Red: `waiting_approval`
+- Blue/cyan: `done`
+- Orange: `error`
+- Purple: `stale`
+
+Click the menu bar icon to show or hide the AgentWatch panel. The panel remains always-on-top and draggable. Closing or hiding the panel does not quit AgentWatch; the local HTTP service keeps running, so Codex hooks can still post to `http://localhost:8787`.
+
+Use the tray right-click menu for:
+
+- `Show Panel` / `Hide Panel`
+- `Open Diagnostics`
+- `Clear Done Sessions`
+- `Launch at Login`
+- `Quit AgentWatch`
+
+`Launch at Login` uses Electron login item settings. It should be verified from a packaged app because development mode runs through the Electron development wrapper.
+
+Build a local macOS app:
+
+```bash
+npm run pack
+```
+
+Create distributable macOS artifacts:
+
+```bash
+npm run dist
+```
+
+The first packaged app is created under `release/mac/AgentWatch.app`. Move it to `/Applications` for local use. This project does not currently include Apple Developer signing, notarization, automatic updates, or Mac App Store packaging.
 
 ## Test Manually
 
@@ -196,14 +239,14 @@ Attempts to open a visible session in Codex:
 ```bash
 curl -s -X POST http://localhost:8787/open-session \
   -H "Content-Type: application/json" \
-  -d '{"id":"/Users/leoclaw/Documents/AgentLight/agent-status-light::open-fallback-test"}'
+  -d '{"id":"/Users/leoclaw/Projects/agent-status-light::open-fallback-test"}'
 ```
 
 Behavior:
 
 - If the session has a trusted `codexThreadId`, the service tries `codex://threads/<codexThreadId>`.
 - If no thread deeplink is available, it falls back to opening the Codex app.
-- Session details are copied to the clipboard either way.
+- It does not copy anything to the clipboard.
 - This endpoint does not change the session state.
 
 ## Status v2
@@ -240,29 +283,14 @@ The session should show `Done` and remain visible until dismissed.
 
 ## Open in Codex
 
-In the expanded Agent Status Light panel, click a visible session row or its `Open` button to return to Codex.
+In the expanded AgentWatch panel, click a visible session row or its `Open` button to return to Codex.
 
-When clicked, Agent Status Light tries this sequence:
+When clicked, AgentWatch tries this sequence:
 
 1. If the session has a valid `codexThreadId`, open `codex://threads/<codexThreadId>`.
 2. If the session does not have a usable deeplink, open the Codex app by bundle id (`com.openai.codex`) or app name.
 3. Ask macOS to activate Codex so it is brought to the foreground.
-4. Copy the session details to the clipboard so you can identify or search for the session manually.
-
-Clipboard content:
-
-```text
-Agent Status Light Session
-
-Project: <projectName>
-Project path: <projectPath>
-Session: <displayTitle>
-Session id: <sessionId>
-Codex thread id: <codexThreadId or unavailable>
-State: <state>
-Message: <message>
-Updated at: <updatedAt>
-```
+4. Leave the clipboard untouched.
 
 This feature is best-effort. It does not use macOS Accessibility automation, does not simulate mouse clicks, and does not depend on the Codex window layout. Because of that, it does not guarantee that Codex will focus the exact input box for a thread. Exact thread focusing depends on Codex Desktop accepting the `codex://threads/<id>` deeplink.
 
@@ -277,7 +305,7 @@ Test a session with a thread deeplink:
 ```bash
 curl -s -X POST http://localhost:8787/status \
   -H "Content-Type: application/json" \
-  -d '{"agent":"codex","projectPath":"/Users/leoclaw/Documents/AgentLight/agent-status-light","projectName":"agent-status-light","sessionId":"open-test","title":"Open in Codex 测试","state":"done","source":"manual","message":"Ready to open","codexThreadId":"00000000-0000-0000-0000-000000000000","codexDeepLink":"codex://threads/00000000-0000-0000-0000-000000000000"}'
+  -d '{"agent":"codex","projectPath":"/Users/leoclaw/Projects/agent-status-light","projectName":"agent-status-light","sessionId":"open-test","title":"Open in Codex 测试","state":"done","source":"manual","message":"Ready to open","codexThreadId":"00000000-0000-0000-0000-000000000000","codexDeepLink":"codex://threads/00000000-0000-0000-0000-000000000000"}'
 ```
 
 Test fallback without a thread id:
@@ -285,11 +313,11 @@ Test fallback without a thread id:
 ```bash
 curl -s -X POST http://localhost:8787/status \
   -H "Content-Type: application/json" \
-  -d '{"agent":"codex","projectPath":"/Users/leoclaw/Documents/AgentLight/agent-status-light","projectName":"agent-status-light","sessionId":"open-fallback-test","title":"Open fallback 测试","state":"waiting_approval","source":"manual","message":"Needs approval"}'
+  -d '{"agent":"codex","projectPath":"/Users/leoclaw/Projects/agent-status-light","projectName":"agent-status-light","sessionId":"open-fallback-test","title":"Open fallback 测试","state":"waiting_approval","source":"manual","message":"Needs approval"}'
 
 curl -s -X POST http://localhost:8787/open-session \
   -H "Content-Type: application/json" \
-  -d '{"id":"/Users/leoclaw/Documents/AgentLight/agent-status-light::open-fallback-test"}'
+  -d '{"id":"/Users/leoclaw/Projects/agent-status-light::open-fallback-test"}'
 ```
 
 Test `stale` quickly:
@@ -306,7 +334,7 @@ curl -s -X POST http://localhost:8787/status \
   -d '{"agent":"codex","state":"running","source":"manual","message":"Codex is running"}'
 ```
 
-After about 10 seconds without any new status event, the light should show `Stale`. `/events` should include a `source: "system"` `stale` event. Stale means the session was previously running, but Agent Status Light has not received a new event for a long time, so the displayed state may no longer be reliable. It does not mean failure or completion.
+After about 10 seconds without any new status event, the light should show `Stale`. `/events` should include a `source: "system"` `stale` event. Stale means the session was previously running, but AgentWatch has not received a new event for a long time, so the displayed state may no longer be reliable. It does not mean failure or completion.
 
 If Codex hooks are actively writing `running` events to port `8787`, the stale timer keeps resetting. For an isolated stale test, use the dedicated test server on port `8788`:
 
@@ -383,7 +411,7 @@ curl -s "http://localhost:8787/statuses?includeHidden=true"
 
 Dismiss semantics:
 
-- `Dismiss` only hides a session from Agent Status Light.
+- `Dismiss` only hides a session from AgentWatch.
 - It does not delete or stop anything in Codex.
 - A dismissed session remains in memory with `visibility: "dismissed"` and `dismissedAt`.
 - A dismissed session becomes visible again if it later receives a non-system `waiting_approval`, `error`, `running`, or `done` event.
@@ -394,7 +422,7 @@ Dismiss one session:
 ```bash
 curl -s -X POST http://localhost:8787/dismiss-session \
   -H "Content-Type: application/json" \
-  -d '{"id":"/Users/leoclaw/Documents/AgentLight/agent-status-light::session-a"}'
+  -d '{"id":"/Users/leoclaw/Projects/agent-status-light::session-a"}'
 ```
 
 Correct a session title only when you are sure the session `id` belongs to that real Codex session:
@@ -423,7 +451,7 @@ Dismiss a project:
 ```bash
 curl -s -X POST http://localhost:8787/dismiss-project \
   -H "Content-Type: application/json" \
-  -d '{"projectId":"/Users/leoclaw/Documents/AgentLight/agent-status-light"}'
+  -d '{"projectId":"/Users/leoclaw/Projects/agent-status-light"}'
 ```
 
 Dismiss visible done sessions:
@@ -446,11 +474,11 @@ Simulate two sessions in one project:
 ```bash
 curl -s -X POST http://localhost:8787/status \
   -H "Content-Type: application/json" \
-  -d '{"agent":"codex","projectPath":"/Users/leoclaw/Documents/AgentLight/agent-status-light","projectName":"agent-status-light","sessionId":"session-a","sessionName":"修复 UI","state":"waiting_approval","source":"manual","message":"Needs approval"}'
+  -d '{"agent":"codex","projectPath":"/Users/leoclaw/Projects/agent-status-light","projectName":"agent-status-light","sessionId":"session-a","sessionName":"修复 UI","state":"waiting_approval","source":"manual","message":"Needs approval"}'
 
 curl -s -X POST http://localhost:8787/status \
   -H "Content-Type: application/json" \
-  -d '{"agent":"codex","projectPath":"/Users/leoclaw/Documents/AgentLight/agent-status-light","projectName":"agent-status-light","sessionId":"session-b","sessionName":"更新 README","state":"running","source":"manual","message":"Running"}'
+  -d '{"agent":"codex","projectPath":"/Users/leoclaw/Projects/agent-status-light","projectName":"agent-status-light","sessionId":"session-b","sessionName":"更新 README","state":"running","source":"manual","message":"Running"}'
 ```
 
 The project and overall states should be `waiting_approval`.
@@ -468,7 +496,7 @@ Delete one session:
 ```bash
 curl -s -X DELETE http://localhost:8787/session \
   -H "Content-Type: application/json" \
-  -d '{"id":"/Users/leoclaw/Documents/AgentLight/agent-status-light::session-a"}'
+  -d '{"id":"/Users/leoclaw/Projects/agent-status-light::session-a"}'
 ```
 
 The response includes `deletedCount` and `deletedSessionIds`. If your shell or client has trouble sending a JSON body with `DELETE`, use `POST` or a URL-encoded query instead:
@@ -476,7 +504,7 @@ The response includes `deletedCount` and `deletedSessionIds`. If your shell or c
 ```bash
 curl -s -X POST http://localhost:8787/session \
   -H "Content-Type: application/json" \
-  -d '{"id":"/Users/leoclaw/Documents/AgentLight/agent-status-light::session-a"}'
+  -d '{"id":"/Users/leoclaw/Projects/agent-status-light::session-a"}'
 ```
 
 Delete one project:
@@ -505,7 +533,7 @@ Codex hook reporter project/session extraction:
 - `codexDeepLink` is generated as `codex://threads/<codexThreadId>` only when `codexThreadId` is valid.
 - If no stable id exists, it falls back to a default session id derived from `cwd`.
 
-Current limitation: if a Codex hook payload does not provide a real session/thread/conversation id, multiple same-project Codex sessions may still collapse into the same fallback `default-session`. The model is ready for stable ids when Codex provides them. Agent Status Light does not treat full local session filenames as thread ids.
+Current limitation: if a Codex hook payload does not provide a real session/thread/conversation id, multiple same-project Codex sessions may still collapse into the same fallback `default-session`. The model is ready for stable ids when Codex provides them. AgentWatch does not treat full local session filenames as thread ids.
 
 ## Diagnostics
 
@@ -568,11 +596,11 @@ User-level hooks are usually simpler because they do not depend on whether a pro
 
 ## Verify Hooks In Codex CLI
 
-1. Start Agent Status Light with `npm run dev`.
+1. Start AgentWatch with `npm run dev`.
 2. Start Codex CLI in the project:
 
    ```bash
-   codex -C /Users/leoclaw/Documents/AgentLight/agent-status-light
+   codex -C /Users/leoclaw/Projects/agent-status-light
    ```
 
 3. If Codex shows a hook review/trust flow, review and trust the hooks.
@@ -591,7 +619,7 @@ hooks = false
 
 Common causes:
 
-- The Agent Status Light app is not running, so `localhost:8787` is unavailable.
+- The AgentWatch app is not running, so `localhost:8787` is unavailable.
 - `~/.codex/hooks.json` is not valid JSON.
 - The hook definition changed and needs to be reviewed again with `/hooks`.
 - Project-local `.codex/hooks.json` is ignored because the project is not trusted.
@@ -609,7 +637,7 @@ Current validation:
 - Codex CLI can read `~/.codex/hooks.json`.
 - Codex CLI shows the hook trust flow for new or changed command hooks.
 - Codex CLI successfully triggers `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, and `Stop`.
-- `PermissionRequest` can update Agent Status Light to `waiting_approval` with `source: "codex-hook"`.
+- `PermissionRequest` can update AgentWatch to `waiting_approval` with `source: "codex-hook"`.
 - `Stop` maps to `done`, not `idle`, so you can see that the previous task just completed before the light returns to idle automatically.
 
 Codex Desktop App supports command hooks in current testing, but each project or surface may require a hook review/trust flow before the commands run. If Desktop does not turn the light red, first open the hooks configuration UI and confirm the five hooks are enabled: `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, and `Stop`.
@@ -675,8 +703,11 @@ Current mapping:
 ## Current Limits
 
 - State is stored in memory only.
-- The UI displays the latest single status, although `agent` and `project` are preserved for future multi-agent support.
-- No packaged installer is included yet.
+- The menu bar icon is implemented for macOS first.
+- `npm run pack` creates a local `.app`; signed installers are not included yet.
+- Launch at Login uses Electron login item settings and should be verified from the packaged app.
+- Apple Developer signing and notarization are not configured.
+- Automatic updates are not implemented.
 - The optional sound is currently a terminal bell; platform-specific audio can be added later.
 - Codex Desktop hook support is not assumed. The app now tracks `source` so CLI hooks, manual updates, and future fallback monitors can be distinguished.
 - `stale` only means no fresh status event arrived while the state was `running`; it does not prove Codex is actually stuck.

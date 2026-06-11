@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import http, { IncomingMessage, ServerResponse } from "node:http";
 import path from "node:path";
@@ -153,6 +153,7 @@ export class StatusStore extends EventEmitter {
 
     return {
       ok: true,
+      serviceName: "AgentWatch",
       statusVersion: "v3-hierarchical",
       currentStatus: this.getStatus(),
       hookHealth: {
@@ -207,12 +208,10 @@ export class StatusStore extends EventEmitter {
         opened: false,
         strategy: "failed",
         fallbackUsed: false,
-        copiedToClipboard: false,
         message: "Session not found."
       };
     }
 
-    const copiedToClipboard = await copyToClipboard(formatClipboardSession(session));
     const deeplink = session.codexDeepLink;
 
     if (deeplink) {
@@ -224,7 +223,6 @@ export class StatusStore extends EventEmitter {
           strategy: "deeplink",
           target: deeplink,
           fallbackUsed: false,
-          copiedToClipboard,
           message: "Opened Codex thread deeplink."
         };
       } catch {
@@ -235,10 +233,9 @@ export class StatusStore extends EventEmitter {
           strategy: fallback ? "open-app" : "failed",
           target: fallback ? this.codexAppName : deeplink,
           fallbackUsed: true,
-          copiedToClipboard,
           message: fallback
             ? "Opened Codex app. Exact thread deeplink was unavailable."
-            : "Could not open Codex automatically. Session info copied to clipboard."
+            : "Could not open Codex automatically."
         };
       }
     }
@@ -250,10 +247,9 @@ export class StatusStore extends EventEmitter {
       strategy: opened ? "open-app" : "failed",
       target: this.codexAppName,
       fallbackUsed: true,
-      copiedToClipboard,
       message: opened
         ? "Opened Codex app. Exact thread deeplink was unavailable."
-        : "Could not open Codex automatically. Session info copied to clipboard."
+        : "Could not open Codex automatically."
     };
   }
 
@@ -721,7 +717,7 @@ export function startStatusServer(config: AppConfig, store: StatusStore): Promis
     server.once("error", reject);
     server.listen(config.port, "127.0.0.1", () => {
       server.off("error", reject);
-      console.log(`Agent Status Light listening at http://localhost:${config.port}`);
+      console.log(`AgentWatch listening at http://localhost:${config.port}`);
       resolve(server);
     });
   });
@@ -1080,21 +1076,6 @@ function readPath(value: unknown, keys: string[]): unknown {
   return current;
 }
 
-function formatClipboardSession(session: SessionStatus): string {
-  return [
-    "Agent Status Light Session",
-    "",
-    `Project: ${session.projectName}`,
-    `Project path: ${session.projectPath || "unavailable"}`,
-    `Session: ${session.displayTitle || session.sessionName || session.title || session.sessionId}`,
-    `Session id: ${session.sessionId}`,
-    `Codex thread id: ${session.codexThreadId || "unavailable"}`,
-    `State: ${session.state}`,
-    `Message: ${session.message || ""}`,
-    `Updated at: ${new Date(session.updatedAt).toISOString()}`
-  ].join("\n");
-}
-
 async function openTarget(target: string): Promise<void> {
   if (process.platform === "darwin") {
     await execFileAsync("open", [target]);
@@ -1165,19 +1146,6 @@ async function activateCodexApp(appName: string, bundleId: string): Promise<void
 
 function escapeAppleScript(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-}
-
-async function copyToClipboard(value: string): Promise<boolean> {
-  if (process.platform !== "darwin") {
-    return false;
-  }
-
-  return new Promise((resolve) => {
-    const child = spawn("pbcopy");
-    child.on("error", () => resolve(false));
-    child.on("close", (code) => resolve(code === 0));
-    child.stdin.end(value);
-  });
 }
 
 function text(value: unknown): string | undefined {
