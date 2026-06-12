@@ -46,14 +46,20 @@ async function main() {
     text(parsed?.prompt) ||
       text(parsed?.user_prompt) ||
       text(parsed?.message) ||
-      text(parsed?.input),
+      text(parsed?.input) ||
+      text(parsed?.text),
   );
+  const promptFileName = extractPromptFileName(parsed);
+  const filePromptTitle = promptFileName
+    ? `File: ${promptFileName}`
+    : undefined;
   const promptSummary = summarizeText(promptText);
   const commandSummary = commandText(parsed)
     ? `Run: ${summarizeText(commandText(parsed))}`
     : undefined;
   const title =
     text(parsed?.title) ||
+    (hookEventName === "UserPromptSubmit" ? filePromptTitle : undefined) ||
     (hookEventName === "UserPromptSubmit" ? promptSummary : undefined);
   const normalizedState = hasQuotaLimitSignal(message, parsed)
     ? "error"
@@ -69,7 +75,12 @@ async function main() {
     sessionId,
     sessionName: text(parsed?.sessionName) || title,
     title,
+    filePromptTitle,
+    lastUserPrompt: promptText,
     firstUserPromptSummary: promptSummary,
+    lastUserPromptAt: promptText ? Date.now() : undefined,
+    promptInputType: promptFileName ? "file" : promptText ? "text" : undefined,
+    promptFileName,
     commandSummary,
     lastHookEvent: hookEventName,
     lastCommandSummary: commandSummary,
@@ -222,6 +233,102 @@ function commandText(parsed) {
     text(parsed?.tool_input?.command) ||
     text(parsed?.input?.command)
   );
+}
+
+function extractPromptFileName(parsed) {
+  const candidates = [
+    ...fileCandidatesFromValue(parsed?.files),
+    ...fileCandidatesFromValue(parsed?.attachments),
+    ...fileCandidatesFromValue(parsed?.file),
+    ...fileCandidatesFromValue(parsed?.path),
+    ...fileCandidatesFromValue(parsed?.filename),
+    ...fileCandidatesFromValue(parsed?.name),
+    ...fileCandidatesFromValue(parsed?.input?.file),
+    ...fileCandidatesFromValue(parsed?.input?.path),
+    ...fileCandidatesFromValue(parsed?.prompt),
+    ...fileCandidatesFromValue(parsed?.user_prompt),
+    ...fileCandidatesFromValue(parsed?.message),
+    ...fileCandidatesFromValue(parsed?.input),
+  ];
+
+  return candidates.find(isTextFileName);
+}
+
+function fileCandidatesFromValue(value) {
+  if (!value) {
+    return [];
+  }
+
+  if (Array.isArray(value)) {
+    return value.flatMap(fileCandidatesFromValue);
+  }
+
+  if (typeof value === "object") {
+    return [
+      ...fileCandidatesFromValue(value.name),
+      ...fileCandidatesFromValue(value.filename),
+      ...fileCandidatesFromValue(value.path),
+      ...fileCandidatesFromValue(value.file),
+    ];
+  }
+
+  const candidate = text(value);
+  if (!candidate) {
+    return [];
+  }
+
+  return fileCandidatesFromText(candidate);
+}
+
+function fileCandidatesFromText(value) {
+  const candidates = [];
+  const cleaned = value.replace(/^file:\/\//i, "").trim();
+  const pathMatches = cleaned.matchAll(
+    /\/[^\n\r"'<>]+?\.(?:md|txt|json|ya?ml|csv|tsx?|jsx?|py|docx|pdf)\b/gi,
+  );
+
+  for (const match of pathMatches) {
+    candidates.push(path.basename(match[0].trim()));
+  }
+
+  const fileMatches = cleaned.matchAll(
+    /(?:^|[\s"'`])([^\/\s"'`<>:]+\.(?:md|txt|json|ya?ml|csv|tsx?|jsx?|py|docx|pdf))\b/gi,
+  );
+
+  for (const match of fileMatches) {
+    if (match[1]) {
+      candidates.push(path.basename(match[1].trim()));
+    }
+  }
+
+  if (/^[^\n\r]+?\.(?:md|txt|json|ya?ml|csv|tsx?|jsx?|py|docx|pdf)$/i.test(cleaned)) {
+    candidates.push(path.basename(cleaned));
+  }
+
+  return [...new Set(candidates)];
+}
+
+function isTextFileName(value) {
+  const candidate = text(value);
+  if (!candidate) {
+    return false;
+  }
+
+  return [
+    ".md",
+    ".txt",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".csv",
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".py",
+    ".docx",
+    ".pdf",
+  ].some((extension) => candidate.toLowerCase().endsWith(extension));
 }
 
 function isIgnoredProjectPath(cwd) {

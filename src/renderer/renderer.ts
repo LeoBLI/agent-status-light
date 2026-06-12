@@ -13,6 +13,7 @@ type AgentStatusSource =
   | "system"
   | "unknown";
 type ApprovalMode = "manual" | "auto" | "unknown";
+type PanelMode = "collapsed" | "expanded";
 
 interface SessionStatus {
   id: string;
@@ -23,7 +24,12 @@ interface SessionStatus {
   sessionId: string;
   sessionName?: string;
   title?: string;
+  filePromptTitle?: string;
+  lastUserPrompt?: string;
   firstUserPromptSummary?: string;
+  lastUserPromptAt?: number;
+  promptInputType?: "text" | "file";
+  promptFileName?: string;
   commandSummary?: string;
   displayTitle?: string;
   state: AgentState;
@@ -123,17 +129,23 @@ const dismissAllDone = document.querySelector<HTMLButtonElement>("#dismissAllDon
 const approveAllApproval =
   document.querySelector<HTMLButtonElement>("#approveAllApproval");
 const treeEl = document.querySelector<HTMLElement>("#tree");
+const scrollMore = document.querySelector<HTMLElement>("#scrollMore");
 const statusApi = (
   window as unknown as {
     agentStatus: {
       getStatuses: () => Promise<StatusTree>;
       dismissSession: (id: string) => Promise<StatusTree>;
+      markSessionDone: (id: string) => Promise<{ ok: boolean; tree: StatusTree }>;
       dismissAllDone: () => Promise<StatusTree>;
       approveAllApproval: () => Promise<ApproveAllApprovalResult>;
       openSession: (id: string) => Promise<OpenSessionResult>;
       hideWindow: () => void;
-      setExpanded: (expanded: boolean) => void;
+      setPanelMode: (mode: PanelMode) => Promise<PanelMode>;
+      getPanelMode: () => Promise<PanelMode>;
+      enlargeExpandedPanel: () => Promise<PanelMode>;
+      setExpanded: (expanded: boolean) => Promise<PanelMode>;
       onStatuses: (callback: (tree: StatusTree) => void) => () => void;
+      onPanelMode: (callback: (mode: PanelMode) => void) => () => void;
     };
   }
 ).agentStatus;
@@ -143,6 +155,7 @@ let currentTree: StatusTree | undefined;
 let transientMessage: string | undefined;
 let transientMessageTimer: number | undefined;
 const expandedSessionIds = new Set<string>();
+const advancedDetailsSessionIds = new Set<string>();
 
 document.addEventListener("DOMContentLoaded", async () => {
   root?.addEventListener("click", (event) => {
@@ -163,6 +176,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     statusApi.hideWindow();
   });
 
+  treeEl?.addEventListener("scroll", updateScrollIndicator);
+  scrollMore?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    void handleScrollMoreClick();
+  });
+
   dismissAllDone?.addEventListener("click", async (event) => {
     event.stopPropagation();
     render(await statusApi.dismissAllDone());
@@ -178,31 +197,46 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   statusApi.onStatuses(render);
-  render(await statusApi.getStatuses());
+  statusApi.onPanelMode(applyPanelMode);
+  applyPanelMode(await statusApi.getPanelMode());
+  await refreshStatuses();
 
-  window.setInterval(() => {
-    if (currentTree) {
-      render(currentTree);
-    }
-  }, 1000);
+  window.addEventListener("focus", () => {
+    void refreshStatuses();
+  });
 });
 
-function toggleExpanded(): void {
-  expanded = !expanded;
-  root?.classList.toggle("expanded", expanded);
-  if (toggle) {
-    toggle.textContent = expanded ? "Collapse" : "Expand";
-  }
-  statusApi.setExpanded(expanded);
+async function refreshStatuses(): Promise<void> {
+  render(await statusApi.getStatuses());
+}
+
+async function toggleExpanded(): Promise<void> {
+  await setPanelMode(expanded ? "collapsed" : "expanded");
+}
+
+async function setPanelMode(mode: PanelMode): Promise<void> {
+  applyPanelMode(await statusApi.setPanelMode(mode));
 
   if (currentTree) {
     render(currentTree);
   }
 }
 
+function applyPanelMode(mode: PanelMode): void {
+  expanded = mode === "expanded";
+  root?.classList.toggle("expanded", expanded);
+  root?.classList.toggle("collapsed", !expanded);
+  if (toggle) {
+    toggle.textContent = expanded ? "Collapse" : "Expand";
+  }
+  queueScrollIndicatorUpdate();
+}
+
 function render(tree: StatusTree): void {
   currentTree = tree;
   document.body.dataset.state = tree.overall.state;
+  root?.classList.toggle("expanded", expanded);
+  root?.classList.toggle("collapsed", !expanded);
 
   if (overallLight) {
     overallLight.dataset.state = tree.overall.state;
@@ -231,21 +265,65 @@ function render(tree: StatusTree): void {
     return;
   }
 
+  const previousTreeScrollTop = treeEl.scrollTop;
   treeEl.textContent = "";
-  const projects = expanded ? tree.projects : tree.projects.slice(0, 2);
+  const sortedProjects = sortProjects(tree.projects);
+  const projects = expanded ? sortedProjects : sortedProjects.slice(0, 5);
 
   if (projects.length === 0) {
     treeEl.append(emptyNode());
+    queueScrollIndicatorUpdate();
     return;
   }
 
   for (const project of projects) {
     treeEl.append(projectNode(project));
-    const sessions = expanded ? project.sessions : project.sessions.slice(0, 2);
-    for (const session of sessions) {
-      treeEl.append(sessionNode(session));
+    if (expanded) {
+      for (const session of sortSessions(project.sessions)) {
+        treeEl.append(sessionNode(session));
+      }
     }
   }
+
+  if (!expanded && sortedProjects.length > projects.length) {
+    treeEl.append(moreProjectsNode(sortedProjects.length - projects.length));
+  }
+
+  treeEl.scrollTop = Math.min(previousTreeScrollTop, treeEl.scrollHeight);
+  queueScrollIndicatorUpdate();
+}
+
+function queueScrollIndicatorUpdate(): void {
+  window.requestAnimationFrame(updateScrollIndicator);
+}
+
+function updateScrollIndicator(): void {
+  if (!treeEl || !root || !scrollMore) {
+    return;
+  }
+
+  const canScroll = treeEl.scrollHeight > treeEl.clientHeight + 2;
+  const atBottom =
+    treeEl.scrollTop + treeEl.clientHeight >= treeEl.scrollHeight - 2;
+  const show = canScroll && !atBottom;
+
+  root.classList.toggle("has-scroll-more", show);
+  root.classList.toggle("at-scroll-end", canScroll && atBottom);
+  scrollMore.hidden = !show;
+}
+
+async function handleScrollMoreClick(): Promise<void> {
+  if (!treeEl) {
+    return;
+  }
+
+  if (!expanded) {
+    await setPanelMode("expanded");
+    return;
+  }
+
+  applyPanelMode(await statusApi.enlargeExpandedPanel());
+  queueScrollIndicatorUpdate();
 }
 
 function projectNode(project: ProjectStatus): HTMLElement {
@@ -262,15 +340,26 @@ function projectNode(project: ProjectStatus): HTMLElement {
 
   const title = document.createElement("div");
   title.className = "row-title";
-  title.textContent = `Project: ${project.projectName}`;
+  title.textContent = expanded ? `Project: ${project.projectName}` : project.projectName;
 
   const meta = document.createElement("div");
   meta.className = "row-meta";
-  meta.textContent = `${stateLabel(project.state)} · ${project.sessions.length} session${project.sessions.length === 1 ? "" : "s"}`;
+  meta.textContent = projectMeta(project);
 
   main.append(title, meta);
   row.append(light, main);
   return row;
+}
+
+function moreProjectsNode(count: number): HTMLElement {
+  const node = document.createElement("div");
+  node.className = "more-projects";
+  node.textContent = `+ ${count} more projects`;
+  node.addEventListener("click", (event) => {
+    event.stopPropagation();
+    void setPanelMode("expanded");
+  });
+  return node;
 }
 
 function sessionNode(session: SessionStatus): HTMLElement {
@@ -300,12 +389,6 @@ function sessionNode(session: SessionStatus): HTMLElement {
 
   main.append(title, meta);
 
-  if (expandedSessionIds.has(session.id)) {
-    main.append(sessionDetails(session));
-  }
-
-  row.append(light, main);
-
   const open = document.createElement("button");
   open.className = "open-session";
   open.type = "button";
@@ -315,37 +398,63 @@ function sessionNode(session: SessionStatus): HTMLElement {
     event.stopPropagation();
     await openSession(session, open);
   });
-  row.append(open);
 
-  const details = document.createElement("button");
-  details.className = "details-toggle";
-  details.type = "button";
-  details.textContent = expandedSessionIds.has(session.id) ? "Hide Details" : "Details";
-  details.addEventListener("click", (event) => {
+  const actions = document.createElement("div");
+  actions.className = "session-row-actions";
+  actions.addEventListener("click", (event) => {
     event.stopPropagation();
-    if (expandedSessionIds.has(session.id)) {
-      expandedSessionIds.delete(session.id);
-    } else {
-      expandedSessionIds.add(session.id);
-    }
-
-    if (currentTree) {
-      render(currentTree);
-    }
   });
-  row.append(details);
+  actions.append(open, ...sessionActionButtons(session));
 
-  const dismiss = document.createElement("button");
-  dismiss.className = "dismiss";
-  dismiss.type = "button";
-  dismiss.textContent = "Dismiss";
-  dismiss.addEventListener("click", async (event) => {
-    event.stopPropagation();
-    render(await statusApi.dismissSession(session.id));
-  });
-  row.append(dismiss);
+  row.append(light, main, actions);
+  if (expandedSessionIds.has(session.id)) {
+    row.append(sessionDetails(session));
+  }
 
   return row;
+}
+
+function sessionActionButtons(session: SessionStatus): HTMLButtonElement[] {
+  const dismiss = actionButton("Dismiss", async () => {
+    expandedSessionIds.delete(session.id);
+    advancedDetailsSessionIds.delete(session.id);
+    render(await statusApi.dismissSession(session.id));
+  });
+  dismiss.className = "dismiss";
+
+  const details = actionButton(
+    expandedSessionIds.has(session.id) ? "Hide Details" : "Details",
+    () => {
+      toggleDetails(session.id);
+    },
+  );
+  details.className = "details-toggle";
+
+  return [dismiss, details];
+}
+
+function toggleDetails(sessionId: string): void {
+  if (expandedSessionIds.has(sessionId)) {
+    expandedSessionIds.delete(sessionId);
+    advancedDetailsSessionIds.delete(sessionId);
+  } else {
+    expandedSessionIds.add(sessionId);
+  }
+
+  if (currentTree) {
+    render(currentTree);
+  }
+}
+
+function actionButton(label: string, onClick: () => void | Promise<void>): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = label;
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    void onClick();
+  });
+  return button;
 }
 
 async function openSession(
@@ -391,6 +500,53 @@ function summaryText(overall: OverallStatus): string {
   }
 
   return `${overall.projectCount} projects · ${overall.sessionCount} sessions`;
+}
+
+function projectMeta(project: ProjectStatus): string {
+  const counts = countsSummary(project.counts);
+  if (!expanded) {
+    return counts || stateLabel(project.state);
+  }
+
+  return `${stateLabel(project.state)}${counts ? ` · ${counts}` : ""}`;
+}
+
+function countsSummary(counts: Record<AgentState, number>): string {
+  return stateOrder()
+    .map((state) => [state, counts[state]] as const)
+    .filter(([, count]) => count > 0)
+    .map(([state, count]) => `${count} ${countLabel(state, count)}`)
+    .join(" · ");
+}
+
+function countLabel(state: AgentState, count: number): string {
+  const label =
+    state === "waiting_approval" ? "approval" : state.replace("_", " ");
+  return count === 1 ? label : `${label}s`;
+}
+
+function sortProjects(projects: ProjectStatus[]): ProjectStatus[] {
+  return [...projects].sort((a, b) => compareStateThenUpdatedAt(a, b));
+}
+
+function sortSessions(sessions: SessionStatus[]): SessionStatus[] {
+  return [...sessions].sort((a, b) => compareStateThenUpdatedAt(a, b));
+}
+
+function compareStateThenUpdatedAt(
+  a: { state: AgentState; updatedAt: number },
+  b: { state: AgentState; updatedAt: number },
+): number {
+  const stateDelta = statePriority(a.state) - statePriority(b.state);
+  return stateDelta || b.updatedAt - a.updatedAt;
+}
+
+function statePriority(state: AgentState): number {
+  return stateOrder().indexOf(state);
+}
+
+function stateOrder(): AgentState[] {
+  return ["waiting_approval", "error", "stale", "running", "done", "idle"];
 }
 
 function updateBulkActions(tree: StatusTree): void {
@@ -455,63 +611,193 @@ function sessionMeta(session: SessionStatus): string {
 function sessionDetails(session: SessionStatus): HTMLElement {
   const details = document.createElement("div");
   details.className = "session-details";
+  details.dataset.sessionId = session.id;
   details.addEventListener("click", (event) => {
     event.stopPropagation();
   });
 
-  const rows: Array<[string, string | undefined]> = [
-    ["reasonCode", session.reasonCode],
-    ["reasonMessage", session.reasonMessage],
-    ["lastHookEvent", session.lastHookEvent],
-    [
-      "lastCommandSummary",
-      session.lastCommandSummary || session.commandSummary,
-    ],
-    ["source", session.source],
-    ["updatedAt", new Date(session.updatedAt).toLocaleString()],
-    ["duration", formatDuration(Date.now() - session.updatedAt)],
-    ["projectPath", session.projectPath],
-    [
-      "projectPathExists",
-      typeof session.projectPathExists === "boolean"
-        ? String(session.projectPathExists)
-        : undefined,
-    ],
-    ["lastCwd", session.lastCwd],
-    ["sessionId", session.sessionId],
-    ["approvalMode", session.approvalMode],
-    [
-      "approvalRequired",
-      typeof session.approvalRequired === "boolean"
-        ? String(session.approvalRequired)
-        : undefined,
-    ],
-    ["approvalRequestSummary", session.approvalRequestSummary],
-    ["approvalRequestDetails", session.approvalRequestDetails],
-    ["approvalLastEvent", session.approvalLastEvent],
-  ];
+  const rows: Array<[string, string]> = [];
+  const reason = statusReason(session);
+  const approval = approvalRequest(session);
+
+  if (reason) {
+    rows.push(["Status reason", reason]);
+  }
+
+  rows.push(
+    ["Prompt", detailText(promptText(session))],
+    ["Current activity", detailText(currentActivity(session))],
+  );
+
+  if (approval) {
+    rows.push(["Approval request", approval]);
+  }
+
+  rows.push(
+    ["Working directory", detailText(session.lastCwd || session.projectPath)],
+    ["Last updated", formatClock(session.updatedAt)],
+  );
 
   for (const [label, value] of rows) {
-    if (!value) {
-      continue;
+    details.append(detailRow(label, value));
+  }
+
+  const advancedToggle = document.createElement("button");
+  advancedToggle.className = "advanced-toggle";
+  advancedToggle.type = "button";
+  advancedToggle.textContent = "Advanced";
+  advancedToggle.setAttribute(
+    "aria-expanded",
+    advancedDetailsSessionIds.has(session.id) ? "true" : "false",
+  );
+  advancedToggle.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (advancedDetailsSessionIds.has(session.id)) {
+      advancedDetailsSessionIds.delete(session.id);
+    } else {
+      advancedDetailsSessionIds.add(session.id);
     }
 
-    const row = document.createElement("div");
-    row.className = "detail-row";
+    if (currentTree) {
+      render(currentTree);
+    }
+  });
+  details.append(advancedToggle);
 
-    const key = document.createElement("span");
-    key.className = "detail-key";
-    key.textContent = label;
+  if (advancedDetailsSessionIds.has(session.id)) {
+    const advancedRows: Array<[string, string]> = [
+      ["Last hook event", detailText(session.lastHookEvent)],
+      ["Reason code", detailText(session.reasonCode)],
+      ["Source", detailText(session.source)],
+      ["Duration", formatDuration(Date.now() - session.updatedAt)],
+      ["Project path", detailText(session.projectPath)],
+      ["Project path exists", booleanText(session.projectPathExists)],
+      ["Last CWD", detailText(session.lastCwd)],
+      ["Session ID", detailText(session.sessionId)],
+      ["Approval mode", approvalModeDetailLabel(session.approvalMode)],
+      ["Approval required", booleanText(session.approvalRequired)],
+      ["Approval details", detailText(session.approvalRequestDetails)],
+      ["Last approval event", detailText(session.approvalLastEvent)],
+      ["Last tool command", detailText(session.lastCommandSummary || session.commandSummary)],
+    ];
 
-    const val = document.createElement("span");
-    val.className = "detail-value";
-    val.textContent = value;
+    const advanced = document.createElement("div");
+    advanced.className = "advanced-details";
 
-    row.append(key, val);
-    details.append(row);
+    for (const [label, value] of advancedRows) {
+      advanced.append(detailRow(label, value));
+    }
+
+    details.append(advanced);
   }
 
   return details;
+}
+
+function promptText(session: SessionStatus): string | undefined {
+  return (
+    session.filePromptTitle ||
+    session.lastUserPrompt ||
+    session.firstUserPromptSummary ||
+    session.title ||
+    session.sessionName
+  );
+}
+
+function currentActivity(session: SessionStatus): string | undefined {
+  return (
+    session.lastCommandSummary ||
+    session.commandSummary ||
+    usefulReason(session.reasonMessage)
+  );
+}
+
+function statusReason(session: SessionStatus): string | undefined {
+  if (session.state === "running" || session.state === "idle") {
+    return undefined;
+  }
+
+  return usefulReason(session.reasonMessage);
+}
+
+function usefulReason(value: string | undefined): string | undefined {
+  if (!value || value === "-" || value === "Agent is running" || value === "Idle") {
+    return undefined;
+  }
+
+  return value;
+}
+
+function approvalRequest(session: SessionStatus): string | undefined {
+  if (!isApprovalContext(session)) {
+    return undefined;
+  }
+
+  return (
+    session.approvalRequestSummary ||
+    session.approvalRequestDetails ||
+    session.lastCommandSummary ||
+    session.commandSummary
+  );
+}
+
+function isApprovalContext(session: SessionStatus): boolean {
+  return (
+    session.state === "waiting_approval" ||
+    session.approvalRequired === true ||
+    session.lastHookEvent === "PermissionRequest"
+  );
+}
+
+function detailRow(label: string, value: string): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "detail-row";
+
+  const key = document.createElement("span");
+  key.className = "detail-key";
+  key.textContent = label;
+
+  const val = document.createElement("span");
+  val.className = "detail-value";
+  if (label === "Prompt") {
+    val.classList.add("detail-value-prompt");
+  }
+  val.textContent = value;
+
+  row.append(key, val);
+  return row;
+}
+
+function detailText(value: string | undefined): string {
+  return value || "-";
+}
+
+function booleanText(value: boolean | undefined): string {
+  if (typeof value !== "boolean") {
+    return "-";
+  }
+
+  return value ? "Yes" : "No";
+}
+
+function approvalModeDetailLabel(mode: ApprovalMode | undefined): string {
+  switch (mode) {
+    case "manual":
+      return "Manual approval";
+    case "auto":
+      return "Auto approval";
+    case "unknown":
+    default:
+      return "Not reported by hooks";
+  }
+}
+
+function formatClock(timestamp: number): string {
+  return new Date(timestamp).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
 }
 
 function approvalModeLabel(mode: ApprovalMode | undefined): string {

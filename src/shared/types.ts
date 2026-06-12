@@ -35,7 +35,12 @@ export interface SessionStatus {
   sessionId: string;
   sessionName?: string;
   title?: string;
+  filePromptTitle?: string;
+  lastUserPrompt?: string;
   firstUserPromptSummary?: string;
+  lastUserPromptAt?: number;
+  promptInputType?: "text" | "file";
+  promptFileName?: string;
   commandSummary?: string;
   displayTitle?: string;
   state: AgentState;
@@ -115,7 +120,12 @@ export interface StatusUpdateInput {
   sessionName?: string;
   taskId?: string;
   title?: string;
+  filePromptTitle?: string;
+  lastUserPrompt?: string;
   firstUserPromptSummary?: string;
+  lastUserPromptAt?: number;
+  promptInputType?: "text" | "file";
+  promptFileName?: string;
   commandSummary?: string;
   state?: AgentState;
   source?: AgentStatusSource;

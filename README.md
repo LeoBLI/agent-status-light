@@ -4,7 +4,7 @@ Keep an eye on your agents.
 
 AgentWatch is a desktop companion that watches your AI agent sessions, alerts you when they need attention, and helps you return to the right task.
 
-Status: v0.3.2 — Approval UX and Done Cleanup.
+Status: v0.3.7 — UI Regression Fix.
 
 ```text
 Signal Sources
@@ -23,6 +23,7 @@ Electron floating panel + macOS menu bar icon
 - Local HTTP status service with `GET /status`, `POST /status`, `GET /events`, and `GET /diagnostics`.
 - macOS menu bar status icon with show/hide controls.
 - Frameless, always-on-top floating panel.
+- Resizable floating panel with remembered window size and position.
 - Status v2 display: gray `idle`, green `running`, flashing red `waiting_approval`, blue/cyan `done`, orange `error`, purple slow-flashing `stale`.
 - Click the window to expand or collapse status and hook-health details.
 - Open a visible session in Codex with best-effort `codex://` deeplink support and app fallback.
@@ -68,6 +69,10 @@ The menu bar icon mirrors the overall state:
 - Purple: `stale`
 
 Click the menu bar icon to show or hide the AgentWatch panel. The panel remains always-on-top and draggable. Closing or hiding the panel does not quit AgentWatch; the local HTTP service keeps running, so Codex hooks can still post to `http://localhost:8787`.
+
+The panel supports manual resizing. AgentWatch remembers the last window size and position in Electron's app data directory as `window-state.json`, and falls back to a default on-screen position if the saved bounds are no longer visible.
+
+Collapsed mode shows only the overall status and project rows in a compact scrollable overview. Expanded mode shows project rows, session rows, direct `Open` / `Dismiss` / `Details` actions, and Details when opened. Long lists scroll inside the panel and show a subtle `↓ More` indicator while additional rows are below the visible area.
 
 Use the tray right-click menu for:
 

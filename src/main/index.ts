@@ -3,6 +3,8 @@ import {
   BrowserWindow,
   Menu,
   Notification,
+  Rectangle,
+  screen,
   Tray,
   dialog,
   ipcMain,
@@ -10,13 +12,38 @@ import {
   shell
 } from "electron";
 import path from "node:path";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { AgentState, AppConfig, SessionStatus, StatusTree } from "../shared/types";
 import { startStatusServer, StatusStore } from "./status-server";
 
 let mainWindow: BrowserWindow | undefined;
 let tray: Tray | undefined;
 let isQuitting = false;
+
+interface WindowState {
+  x?: number;
+  y?: number;
+  width: number;
+  height: number;
+}
+
+type PanelMode = "collapsed" | "expanded";
+
+interface PanelWindowState {
+  version: number;
+  mode: PanelMode;
+  bounds: WindowState;
+  collapsedBounds: WindowState;
+  expandedBounds: WindowState;
+}
+
+const windowStateVersion = 3;
+const baseDefaultWindowState: WindowState = {
+  width: 240,
+  height: 178
+};
+let panelMode: PanelMode = "collapsed";
+let panelWindowState: PanelWindowState | undefined;
 
 const config = loadConfig();
 const store = new StatusStore({
@@ -56,15 +83,26 @@ if (!gotSingleInstanceLock) {
     ipcMain.handle("statuses:get", () => store.getStatuses());
     ipcMain.handle("diagnostics:get", () => store.getDiagnostics());
     ipcMain.handle("session:dismiss", (_event, id: string) => store.dismissSession(id).tree);
+    ipcMain.handle("session:mark-done", (_event, id: string) => store.markSessionDone(id));
     ipcMain.handle("done:dismiss-all", () => store.clearDone().tree);
     ipcMain.handle("approval:approve-all", () => store.approveAllApproval());
     ipcMain.handle("session:open", (_event, id: string) => store.openSession(id));
     ipcMain.on("window:hide", () => {
+      savePanelWindowState();
       mainWindow?.hide();
       updateTray(store.getStatus().state);
     });
+    ipcMain.handle("panel:set-mode", (_event, mode: PanelMode) => {
+      setPanelMode(mode);
+      return panelMode;
+    });
+    ipcMain.handle("panel:get-mode", () => panelMode);
+    ipcMain.handle("panel:enlarge-expanded", () => {
+      enlargeExpandedPanel();
+      return panelMode;
+    });
     ipcMain.on("window:set-expanded", (_event, expanded: boolean) => {
-      mainWindow?.setSize(360, expanded ? 520 : 260);
+      setPanelMode(expanded ? "expanded" : "collapsed");
     });
 
     store.on("status", (tree, session, previous) => {
@@ -97,17 +135,20 @@ app.on("window-all-closed", () => {
 });
 
 function createWindow(): void {
+  panelWindowState = loadPanelWindowState();
+  panelMode = "collapsed";
+  const windowState = panelWindowState.collapsedBounds;
   mainWindow = new BrowserWindow({
-    width: 220,
-    height: 260,
+    x: windowState.x,
+    y: windowState.y,
+    width: windowState.width,
+    height: windowState.height,
     title: "AgentWatch",
-    minWidth: 280,
-    minHeight: 76,
-    maxWidth: 520,
-    maxHeight: 680,
+    minWidth: 220,
+    minHeight: 160,
     frame: false,
     transparent: true,
-    resizable: false,
+    resizable: true,
     alwaysOnTop: true,
     skipTaskbar: true,
     hasShadow: false,
@@ -118,8 +159,12 @@ function createWindow(): void {
     }
   });
 
+  mainWindow.on("moved", savePanelWindowState);
+  mainWindow.on("resized", savePanelWindowState);
+
   mainWindow.on("close", (event) => {
     if (!isQuitting) {
+      savePanelWindowState();
       event.preventDefault();
       mainWindow?.hide();
       updateTray(store.getStatus().state);
@@ -128,6 +173,280 @@ function createWindow(): void {
 
   mainWindow.setAlwaysOnTop(true, "floating");
   mainWindow.loadFile(path.join(__dirname, "../renderer/index.html"));
+}
+
+function loadPanelWindowState(): PanelWindowState {
+  try {
+    const statePath = windowStatePath();
+    if (!existsSync(statePath)) {
+      return defaultPanelWindowState();
+    }
+
+    const parsed = JSON.parse(readFileSync(statePath, "utf8")) as
+      | Partial<PanelWindowState>
+      | Partial<WindowState>;
+    return normalizePanelWindowState(parsed);
+  } catch (error) {
+    console.warn("Failed to load AgentWatch window state:", error);
+    return defaultPanelWindowState();
+  }
+}
+
+function savePanelWindowState(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+
+  try {
+    const bounds = mainWindow.getBounds();
+    const current = panelWindowState ?? defaultPanelWindowState();
+    const next: PanelWindowState = {
+      ...current,
+      mode: panelMode,
+      bounds,
+      collapsedBounds:
+        panelMode === "collapsed" ? bounds : current.collapsedBounds,
+      expandedBounds:
+        panelMode === "expanded" ? bounds : current.expandedBounds
+    };
+    panelWindowState = next;
+    mkdirSync(path.dirname(windowStatePath()), { recursive: true });
+    writeFileSync(windowStatePath(), JSON.stringify(next, null, 2));
+  } catch (error) {
+    console.warn("Failed to save AgentWatch window state:", error);
+  }
+}
+
+function windowStatePath(): string {
+  return path.join(app.getPath("userData"), "window-state.json");
+}
+
+function setPanelMode(mode: PanelMode): void {
+  panelMode = mode;
+  const state = panelWindowState ?? defaultPanelWindowState();
+  const fallbackBounds =
+    mode === "expanded"
+      ? defaultExpandedBounds(state.collapsedBounds)
+      : defaultCollapsedBounds();
+  const target = ensureWindowStateVisible(
+    mode === "expanded" ? state.expandedBounds : state.collapsedBounds,
+    fallbackBounds
+  );
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.setBounds(target);
+    mainWindow.webContents.send("panel:mode", mode);
+  }
+
+  panelWindowState = {
+    ...state,
+    mode,
+    bounds: target,
+    collapsedBounds: mode === "collapsed" ? target : state.collapsedBounds,
+    expandedBounds: mode === "expanded" ? target : state.expandedBounds
+  };
+  savePanelWindowState();
+}
+
+function enlargeExpandedPanel(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+
+  panelMode = "expanded";
+  const current = mainWindow.getBounds();
+  const workArea = screen.getDisplayMatching(current).workArea;
+  const target = ensureWindowStateVisible(
+    {
+      x: current.x,
+      y: current.y,
+      width: Math.min(
+        Math.round(current.width * 1.25),
+        Math.round(workArea.width * 0.92)
+      ),
+      height: Math.min(
+        Math.round(current.height * 1.35),
+        Math.round(workArea.height * 0.9)
+      )
+    },
+    current
+  );
+
+  mainWindow.setBounds(target);
+  mainWindow.webContents.send("panel:mode", "expanded");
+
+  const state = panelWindowState ?? defaultPanelWindowState();
+  panelWindowState = {
+    ...state,
+    mode: "expanded",
+    bounds: target,
+    expandedBounds: target
+  };
+  savePanelWindowState();
+}
+
+function defaultPanelWindowState(): PanelWindowState {
+  const collapsedBounds = defaultCollapsedBounds();
+  const expandedBounds = defaultExpandedBounds(collapsedBounds);
+  return {
+    version: windowStateVersion,
+    mode: "collapsed",
+    bounds: collapsedBounds,
+    collapsedBounds,
+    expandedBounds
+  };
+}
+
+function defaultCollapsedBounds(): WindowState {
+  return centerWindowState({
+    width: baseDefaultWindowState.width,
+    height: Math.round(baseDefaultWindowState.height * 1.5)
+  });
+}
+
+function defaultExpandedBounds(collapsedBounds: WindowState): WindowState {
+  const workArea = screen.getPrimaryDisplay().workArea;
+  const width = Math.min(
+    Math.round(collapsedBounds.width * 2),
+    Math.round(workArea.width * 0.9)
+  );
+  const height = Math.min(
+    Math.round(collapsedBounds.height * 2),
+    Math.round(workArea.height * 0.85)
+  );
+
+  return ensureWindowStateVisible(
+    {
+      x: collapsedBounds.x,
+      y: collapsedBounds.y,
+      width,
+      height
+    },
+    centerWindowState({ width, height })
+  );
+}
+
+function normalizePanelWindowState(
+  parsed: Partial<PanelWindowState> | Partial<WindowState>
+): PanelWindowState {
+  const legacy = parsed as Partial<WindowState>;
+  const candidate = parsed as Partial<PanelWindowState>;
+
+  if (candidate.version === windowStateVersion && candidate.collapsedBounds) {
+    const collapsedBounds = ensureWindowStateVisible(
+      normalizeBounds(candidate.collapsedBounds, defaultCollapsedBounds()),
+      defaultCollapsedBounds()
+    );
+    const expandedBounds = ensureWindowStateVisible(
+      normalizeBounds(
+        candidate.expandedBounds,
+        defaultExpandedBounds(collapsedBounds)
+      ),
+      defaultExpandedBounds(collapsedBounds)
+    );
+
+    return {
+      version: windowStateVersion,
+      mode: "collapsed",
+      bounds: collapsedBounds,
+      collapsedBounds,
+      expandedBounds
+    };
+  }
+
+  const collapsedBounds = ensureWindowStateVisible(
+    normalizeBounds(
+      {
+        x: legacy.x,
+        y: legacy.y,
+        width:
+          typeof legacy.width === "number"
+            ? Math.round(legacy.width / 2)
+            : undefined,
+        height:
+          typeof legacy.height === "number"
+            ? Math.round(legacy.height / 3)
+            : undefined
+      },
+      defaultCollapsedBounds()
+    ),
+    defaultCollapsedBounds()
+  );
+  const expandedBounds = defaultExpandedBounds(collapsedBounds);
+
+  return {
+    version: windowStateVersion,
+    mode: "collapsed",
+    bounds: collapsedBounds,
+    collapsedBounds,
+    expandedBounds
+  };
+}
+
+function normalizeBounds(
+  value: Partial<WindowState> | undefined,
+  fallback: WindowState
+): WindowState {
+  return {
+    x: typeof value?.x === "number" ? value.x : fallback.x,
+    y: typeof value?.y === "number" ? value.y : fallback.y,
+    width: clampDimension(value?.width, fallback.width, 220, 1600),
+    height: clampDimension(value?.height, fallback.height, 160, 1400)
+  };
+}
+
+function ensureWindowStateVisible(
+  state: WindowState,
+  fallback: WindowState
+): WindowState {
+  return isWindowStateVisible(state) ? state : centerWindowState(state || fallback);
+}
+
+function centerWindowState(size: Pick<WindowState, "width" | "height">): WindowState {
+  const display = screen.getPrimaryDisplay().workArea;
+  return {
+    x: Math.round(display.x + (display.width - size.width) / 2),
+    y: Math.round(display.y + (display.height - size.height) / 2),
+    width: size.width,
+    height: size.height
+  };
+}
+
+function isWindowStateVisible(state: WindowState): boolean {
+  if (typeof state.x !== "number" || typeof state.y !== "number") {
+    return false;
+  }
+
+  const bounds: Rectangle = {
+    x: state.x,
+    y: state.y,
+    width: state.width,
+    height: state.height
+  };
+
+  return screen.getAllDisplays().some((display) => rectanglesIntersect(bounds, display.workArea));
+}
+
+function rectanglesIntersect(a: Rectangle, b: Rectangle): boolean {
+  return (
+    a.x < b.x + b.width &&
+    a.x + a.width > b.x &&
+    a.y < b.y + b.height &&
+    a.y + a.height > b.y
+  );
+}
+
+function clampDimension(
+  value: number | undefined,
+  fallback: number,
+  min: number,
+  max: number
+): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+
+  return Math.min(max, Math.max(min, Math.round(value)));
 }
 
 function createTray(): void {
@@ -156,6 +475,7 @@ function showPanel(): void {
     mainWindow.restore();
   }
 
+  setPanelMode("collapsed");
   mainWindow?.setAlwaysOnTop(true, "floating");
   mainWindow?.show();
   mainWindow?.focus();

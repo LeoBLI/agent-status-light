@@ -47,7 +47,10 @@ interface SessionTimers {
   approval?: NodeJS.Timeout;
 }
 
-const APPROVAL_GRACE_MS = 1500;
+const APPROVAL_GRACE_MS = positiveNumber(
+  process.env.AGENTWATCH_APPROVAL_GRACE_MS,
+  30_000,
+);
 
 export class StatusStore extends EventEmitter {
   private readonly sessions = new Map<string, SessionStatus>();
@@ -600,6 +603,43 @@ export class StatusStore extends EventEmitter {
     };
   }
 
+  markSessionDone(id: string): {
+    ok: boolean;
+    reasonCode?: string;
+    reasonMessage?: string;
+    tree: StatusTree;
+  } {
+    const session = this.sessions.get(id);
+    if (!session) {
+      return {
+        ok: false,
+        reasonCode: "session_not_found",
+        reasonMessage: "Session not found",
+        tree: this.getStatuses(),
+      };
+    }
+
+    const now = Date.now();
+    const previous = { ...session };
+    const next = removeUndefined({
+      ...session,
+      state: "done" as const,
+      source: "manual" as const,
+      message: "Marked done",
+      reasonCode: "manual_done",
+      reasonMessage: "Marked done",
+      approvalRequired: false,
+      lastCompletedAt: now,
+      updatedAt: now,
+    });
+
+    this.applySession(next, previous);
+    return {
+      ok: true,
+      tree: this.getStatuses(),
+    };
+  }
+
   approveAllApproval(): {
     ok: false;
     reasonCode: "approve_action_not_available";
@@ -670,6 +710,11 @@ export class StatusStore extends EventEmitter {
     const id = `${projectId}::${sessionId}`;
     const title =
       text(input.title) || text(raw?.title) || this.titleOverrides.get(id);
+    const promptFileName =
+      text(input.promptFileName) || promptFileNameFromRaw(raw);
+    const filePromptTitle =
+      text(input.filePromptTitle) ||
+      (promptFileName ? `File: ${promptFileName}` : undefined);
     const sessionName = text(input.sessionName) || title || undefined;
     const source =
       input.source && VALID_SOURCES.includes(input.source)
@@ -679,6 +724,11 @@ export class StatusStore extends EventEmitter {
     const quotaLimited = hasQuotaLimitSignal(input, raw);
     const lastHookEvent =
       text(input.lastHookEvent) || text(raw?.hook_event_name);
+    const lastUserPrompt =
+      text(input.lastUserPrompt) || userPromptFromRaw(raw);
+    const firstUserPromptSummary =
+      text(input.firstUserPromptSummary) ||
+      (lastUserPrompt ? summarizeText(lastUserPrompt) : undefined);
     const lastCommandSummary =
       text(input.lastCommandSummary) ||
       text(input.commandSummary) ||
@@ -720,7 +770,17 @@ export class StatusStore extends EventEmitter {
       sessionId,
       sessionName,
       title,
-      firstUserPromptSummary: text(input.firstUserPromptSummary),
+      filePromptTitle,
+      lastUserPrompt,
+      firstUserPromptSummary,
+      lastUserPromptAt:
+        typeof input.lastUserPromptAt === "number"
+          ? input.lastUserPromptAt
+          : lastUserPrompt
+            ? now
+            : undefined,
+      promptInputType: input.promptInputType || (promptFileName ? "file" : lastUserPrompt ? "text" : undefined),
+      promptFileName,
       commandSummary: text(input.commandSummary) || lastCommandSummary,
       state,
       source,
@@ -768,8 +828,13 @@ export class StatusStore extends EventEmitter {
       projectPath: next.projectPath ?? previous?.projectPath,
       sessionName: next.sessionName ?? previous?.sessionName,
       title: next.title ?? previous?.title,
+      filePromptTitle: next.filePromptTitle ?? previous?.filePromptTitle,
+      lastUserPrompt: next.lastUserPrompt ?? previous?.lastUserPrompt,
       firstUserPromptSummary:
         next.firstUserPromptSummary ?? previous?.firstUserPromptSummary,
+      lastUserPromptAt: next.lastUserPromptAt ?? previous?.lastUserPromptAt,
+      promptInputType: next.promptInputType ?? previous?.promptInputType,
+      promptFileName: next.promptFileName ?? previous?.promptFileName,
       commandSummary: next.commandSummary ?? previous?.commandSummary,
       reasonCode: next.reasonCode ?? previous?.reasonCode,
       reasonMessage: next.reasonMessage ?? previous?.reasonMessage,
@@ -1643,6 +1708,15 @@ function isAutoApprovalText(value: string): boolean {
   ].some((marker) => normalized.includes(marker));
 }
 
+function positiveNumber(value: string | undefined, fallback: number): number {
+  if (!value) {
+    return fallback;
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 interface ReasonInput {
   state: AgentState;
   message?: string;
@@ -1721,6 +1795,117 @@ function commandSummaryFromRaw(
 ): string | undefined {
   const command = text(raw?.command);
   return command ? `Run: ${summarizeText(command)}` : undefined;
+}
+
+function userPromptFromRaw(
+  raw: Record<string, unknown> | undefined,
+): string | undefined {
+  return (
+    text(raw?.prompt) ||
+    text(raw?.user_prompt) ||
+    text(raw?.message) ||
+    text(raw?.input) ||
+    text(raw?.text)
+  );
+}
+
+function promptFileNameFromRaw(
+  raw: Record<string, unknown> | undefined,
+): string | undefined {
+  const candidates = [
+    ...fileNameCandidates(raw?.files),
+    ...fileNameCandidates(raw?.attachments),
+    ...fileNameCandidates(raw?.file),
+    ...fileNameCandidates(raw?.path),
+    ...fileNameCandidates(raw?.filename),
+    ...fileNameCandidates(raw?.name),
+    ...fileNameCandidates(readPath(raw, ["input", "file"])),
+    ...fileNameCandidates(readPath(raw, ["input", "path"])),
+    ...fileNameCandidates(raw?.prompt),
+    ...fileNameCandidates(raw?.user_prompt),
+    ...fileNameCandidates(raw?.message),
+    ...fileNameCandidates(raw?.input),
+  ];
+
+  return candidates.find(isTextFileName);
+}
+
+function fileNameCandidates(value: unknown): string[] {
+  if (!value) {
+    return [];
+  }
+
+  if (Array.isArray(value)) {
+    return value.flatMap(fileNameCandidates);
+  }
+
+  const record = asRecord(value);
+  if (record) {
+    return [
+      ...fileNameCandidates(record.name),
+      ...fileNameCandidates(record.filename),
+      ...fileNameCandidates(record.path),
+      ...fileNameCandidates(record.file),
+    ];
+  }
+
+  const candidate = text(value);
+  if (!candidate) {
+    return [];
+  }
+
+  return fileNameCandidatesFromText(candidate);
+}
+
+function fileNameCandidatesFromText(value: string): string[] {
+  const candidates: string[] = [];
+  const cleaned = value.replace(/^file:\/\//i, "").trim();
+  const pathMatches = cleaned.matchAll(
+    /\/[^\n\r"'<>]+?\.(?:md|txt|json|ya?ml|csv|tsx?|jsx?|py|docx|pdf)\b/gi,
+  );
+
+  for (const match of pathMatches) {
+    candidates.push(path.basename(match[0].trim()));
+  }
+
+  const fileMatches = cleaned.matchAll(
+    /(?:^|[\s"'`])([^/\s"'`<>:]+\.(?:md|txt|json|ya?ml|csv|tsx?|jsx?|py|docx|pdf))\b/gi,
+  );
+
+  for (const match of fileMatches) {
+    if (match[1]) {
+      candidates.push(path.basename(match[1].trim()));
+    }
+  }
+
+  if (/^[^\n\r]+?\.(?:md|txt|json|ya?ml|csv|tsx?|jsx?|py|docx|pdf)$/i.test(cleaned)) {
+    candidates.push(path.basename(cleaned));
+  }
+
+  return [...new Set(candidates)];
+}
+
+function isTextFileName(value: string | undefined): boolean {
+  const candidate = text(value)?.toLowerCase();
+  if (!candidate) {
+    return false;
+  }
+
+  return [
+    ".md",
+    ".txt",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".csv",
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".py",
+    ".docx",
+    ".pdf",
+  ].some((extension) => candidate.endsWith(extension));
 }
 
 function summarizeText(value: string): string {
@@ -1842,25 +2027,35 @@ function displayNameFromProject(value: string | undefined): string | undefined {
 
 function makeDisplayTitle(session: SessionStatus): string {
   return (
+    displayText(session.filePromptTitle) ||
     displayText(session.title) ||
-    displayText(session.sessionName) ||
     displayText(session.firstUserPromptSummary) ||
-    displayText(session.commandSummary) ||
-    shortSessionId(session.sessionId) ||
-    `${session.projectName} session`
+    displayText(session.sessionName) ||
+    usefulShortSessionId(session.sessionId) ||
+    "Untitled session"
   );
 }
 
-function shortSessionId(sessionId: string): string | undefined {
-  if (!sessionId || isDefaultSessionId(sessionId)) {
+function summarizeTitle(value: string | undefined): string | undefined {
+  const candidate = displayText(value);
+  if (!candidate) {
     return undefined;
   }
 
-  return sessionId.length > 12 ? sessionId.slice(0, 12) : sessionId;
+  return candidate.length > 48 ? `${candidate.slice(0, 48)}...` : candidate;
 }
 
 function isDefaultSessionId(sessionId: string | undefined): boolean {
   return Boolean(sessionId?.includes("default-session"));
+}
+
+function usefulShortSessionId(sessionId: string | undefined): string | undefined {
+  const candidate = displayText(sessionId);
+  if (!candidate || isDefaultSessionId(candidate) || isCodexThreadId(candidate)) {
+    return undefined;
+  }
+
+  return undefined;
 }
 
 function shouldRedisplay(
@@ -2021,7 +2216,12 @@ function text(value: unknown): string | undefined {
 
 function displayText(value: unknown): string | undefined {
   const candidate = text(value);
-  if (!candidate || candidate.includes("default-session")) {
+  if (
+    !candidate ||
+    candidate.includes("default-session") ||
+    isCodexThreadId(candidate) ||
+    /^[0-9a-f]{8,}(?:-[0-9a-f]{4,}){2,}$/i.test(candidate)
+  ) {
     return undefined;
   }
 

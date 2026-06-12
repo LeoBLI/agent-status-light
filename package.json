@@ -1,7 +1,7 @@
 {
   "name": "agentwatch",
   "productName": "AgentWatch",
-  "version": "0.3.2",
+  "version": "0.3.7",
   "description": "AgentWatch watches your AI agent sessions and alerts you when they need attention.",
   "main": "dist/main/index.js",
   "scripts": {
