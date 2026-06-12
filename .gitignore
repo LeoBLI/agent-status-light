@@ -11,3 +11,6 @@ project-name-overrides.json
 logs/
 *.log
 .DS_Store
+# Local handoff context for Codex conversations
+PROJECT_HANDOFF.md
+USER_PREFERENCES.md

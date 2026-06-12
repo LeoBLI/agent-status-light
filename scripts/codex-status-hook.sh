@@ -4,7 +4,7 @@ set -u
 
 STATE="${1:-idle}"
 MESSAGE="${2:-Codex status changed}"
-LOG_FILE="/Users/leoclaw/Projects/AgentWatch/logs/codex-hook.log"
+LOG_FILE="${AGENTWATCH_HOOK_LOG:-${AGENT_STATUS_LIGHT_HOOK_LOG:-/Users/leoclaw/Projects/AgentWatch/logs/codex-hook.log}}"
 STDIN_PAYLOAD="$(cat)"
 REPORTER="/Users/leoclaw/Projects/AgentWatch/scripts/codex-hook-reporter.js"
 

@@ -1,4 +1,10 @@
-export type AgentState = "idle" | "running" | "waiting_approval" | "done" | "error" | "stale";
+export type AgentState =
+  | "idle"
+  | "running"
+  | "waiting_approval"
+  | "done"
+  | "error"
+  | "stale";
 
 export type AgentStatusSource =
   | "manual"
@@ -9,6 +15,7 @@ export type AgentStatusSource =
   | "unknown";
 
 export type CodexOpenTargetType = "codex-thread" | "codex-app" | "unknown";
+export type ApprovalMode = "manual" | "auto" | "unknown";
 
 export interface CodexOpenTarget {
   type: CodexOpenTargetType;
@@ -34,6 +41,17 @@ export interface SessionStatus {
   state: AgentState;
   source?: AgentStatusSource;
   message?: string;
+  reasonCode?: string;
+  reasonMessage?: string;
+  lastHookEvent?: string;
+  lastCommandSummary?: string;
+  lastCwd?: string;
+  projectPathExists?: boolean;
+  approvalMode?: ApprovalMode;
+  approvalRequired?: boolean;
+  approvalRequestSummary?: string;
+  approvalRequestDetails?: string;
+  approvalLastEvent?: string;
   updatedAt: number;
   createdAt: number;
   visibility?: SessionVisibility;
@@ -65,6 +83,9 @@ export interface OverallStatus {
   projectCount: number;
   sessionCount: number;
   waitingApprovalCount: number;
+  approvalMode: ApprovalMode;
+  visibleApprovalRequiredCount: number;
+  doneCount: number;
   runningCount: number;
   errorCount: number;
   staleCount: number;
@@ -99,6 +120,17 @@ export interface StatusUpdateInput {
   state?: AgentState;
   source?: AgentStatusSource;
   message?: string;
+  reasonCode?: string;
+  reasonMessage?: string;
+  lastHookEvent?: string;
+  lastCommandSummary?: string;
+  lastCwd?: string;
+  projectPathExists?: boolean;
+  approvalMode?: ApprovalMode;
+  approvalRequired?: boolean;
+  approvalRequestSummary?: string;
+  approvalRequestDetails?: string;
+  approvalLastEvent?: string;
   codexThreadId?: string;
   codexSessionId?: string;
   codexSessionPath?: string;
@@ -123,6 +155,24 @@ export interface Diagnostics {
     doneDisplayMs: number;
     staleTimeoutMs: number;
   };
+  stateSemantics: {
+    doneAutoDismiss: false;
+    postToolUseMarksDone: false;
+    staleTimeoutMs: number;
+    missingPathCleanupAvailable: true;
+  };
+  visibleWaitingApprovalCount: number;
+  approvalMode: ApprovalMode;
+  visibleApprovalRequiredCount: number;
+  autoApprovalEventCount: number;
+  manualApprovalRequiredCount: number;
+  dismissAllDoneAvailable: true;
+  detailsPanelAvailable: true;
+  approveAllApprovalAvailable: false;
+  approveActionReason: "approve_action_not_available";
+  visibleStaleCount: number;
+  visibleErrorCount: number;
+  missingProjectPathSessionCount: number;
   codexOpenSupport: {
     appName: string;
     bundleId: string;
@@ -151,7 +201,7 @@ export const VALID_STATES: AgentState[] = [
   "waiting_approval",
   "done",
   "error",
-  "stale"
+  "stale",
 ];
 
 export const VALID_SOURCES: AgentStatusSource[] = [
@@ -160,7 +210,7 @@ export const VALID_SOURCES: AgentStatusSource[] = [
   "codex-desktop-monitor",
   "browser-monitor",
   "system",
-  "unknown"
+  "unknown",
 ];
 
 export const STATE_PRIORITY: Record<AgentState, number> = {
@@ -169,7 +219,7 @@ export const STATE_PRIORITY: Record<AgentState, number> = {
   stale: 3,
   running: 2,
   done: 1,
-  idle: 0
+  idle: 0,
 };
 
 export function emptyCounts(): Record<AgentState, number> {
@@ -179,6 +229,6 @@ export function emptyCounts(): Record<AgentState, number> {
     waiting_approval: 0,
     done: 0,
     error: 0,
-    stale: 0
+    stale: 0,
   };
 }

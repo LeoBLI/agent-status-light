@@ -56,6 +56,8 @@ if (!gotSingleInstanceLock) {
     ipcMain.handle("statuses:get", () => store.getStatuses());
     ipcMain.handle("diagnostics:get", () => store.getDiagnostics());
     ipcMain.handle("session:dismiss", (_event, id: string) => store.dismissSession(id).tree);
+    ipcMain.handle("done:dismiss-all", () => store.clearDone().tree);
+    ipcMain.handle("approval:approve-all", () => store.approveAllApproval());
     ipcMain.handle("session:open", (_event, id: string) => store.openSession(id));
     ipcMain.on("window:hide", () => {
       mainWindow?.hide();
@@ -359,7 +361,11 @@ function handleSideEffects(
   session: SessionStatus,
   previous: SessionStatus | undefined
 ): void {
-  if (session.state === "waiting_approval" && previous?.state !== "waiting_approval") {
+  if (
+    session.state === "waiting_approval" &&
+    session.approvalRequired === true &&
+    previous?.state !== "waiting_approval"
+  ) {
     sendApprovalNotification(session);
     maybePlaySound();
   }

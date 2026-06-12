@@ -6,6 +6,8 @@ contextBridge.exposeInMainWorld("agentStatus", {
   getStatuses: (): Promise<StatusTree> => ipcRenderer.invoke("statuses:get"),
   getDiagnostics: (): Promise<Diagnostics> => ipcRenderer.invoke("diagnostics:get"),
   dismissSession: (id: string): Promise<StatusTree> => ipcRenderer.invoke("session:dismiss", id),
+  dismissAllDone: (): Promise<StatusTree> => ipcRenderer.invoke("done:dismiss-all"),
+  approveAllApproval: (): Promise<unknown> => ipcRenderer.invoke("approval:approve-all"),
   openSession: (id: string): Promise<OpenSessionResult> => ipcRenderer.invoke("session:open", id),
   hideWindow: (): void => {
     ipcRenderer.send("window:hide");

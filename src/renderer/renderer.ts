@@ -1,4 +1,10 @@
-type AgentState = "idle" | "running" | "waiting_approval" | "done" | "error" | "stale";
+type AgentState =
+  | "idle"
+  | "running"
+  | "waiting_approval"
+  | "done"
+  | "error"
+  | "stale";
 type AgentStatusSource =
   | "manual"
   | "codex-hook"
@@ -6,6 +12,7 @@ type AgentStatusSource =
   | "browser-monitor"
   | "system"
   | "unknown";
+type ApprovalMode = "manual" | "auto" | "unknown";
 
 interface SessionStatus {
   id: string;
@@ -22,6 +29,17 @@ interface SessionStatus {
   state: AgentState;
   source?: AgentStatusSource;
   message?: string;
+  reasonCode?: string;
+  reasonMessage?: string;
+  lastHookEvent?: string;
+  lastCommandSummary?: string;
+  lastCwd?: string;
+  projectPathExists?: boolean;
+  approvalMode?: ApprovalMode;
+  approvalRequired?: boolean;
+  approvalRequestSummary?: string;
+  approvalRequestDetails?: string;
+  approvalLastEvent?: string;
   updatedAt: number;
   createdAt: number;
   visibility?: "visible" | "dismissed";
@@ -57,6 +75,9 @@ interface OverallStatus {
   projectCount: number;
   sessionCount: number;
   waitingApprovalCount: number;
+  approvalMode: ApprovalMode;
+  visibleApprovalRequiredCount: number;
+  doneCount: number;
   runningCount: number;
   errorCount: number;
   staleCount: number;
@@ -76,28 +97,52 @@ interface OpenSessionResult {
   message: string;
 }
 
+interface ApproveAllApprovalResult {
+  ok: boolean;
+  reasonCode?: string;
+  reasonMessage?: string;
+  approvedCount: number;
+  failedCount: number;
+  results: Array<{
+    sessionId: string;
+    ok: boolean;
+    reasonCode?: string;
+    reasonMessage?: string;
+  }>;
+  tree?: StatusTree;
+}
+
 const root = document.querySelector<HTMLElement>("#app");
 const toggle = document.querySelector<HTMLButtonElement>("#toggle");
 const hideWindow = document.querySelector<HTMLButtonElement>("#hideWindow");
 const overallLight = document.querySelector<HTMLElement>("#overallLight");
 const overallLabel = document.querySelector<HTMLElement>("#overallLabel");
 const overallMessage = document.querySelector<HTMLElement>("#overallMessage");
+const approvalModeEl = document.querySelector<HTMLElement>("#approvalMode");
+const dismissAllDone = document.querySelector<HTMLButtonElement>("#dismissAllDone");
+const approveAllApproval =
+  document.querySelector<HTMLButtonElement>("#approveAllApproval");
 const treeEl = document.querySelector<HTMLElement>("#tree");
-const statusApi = (window as unknown as {
-  agentStatus: {
-    getStatuses: () => Promise<StatusTree>;
-    dismissSession: (id: string) => Promise<StatusTree>;
-    openSession: (id: string) => Promise<OpenSessionResult>;
-    hideWindow: () => void;
-    setExpanded: (expanded: boolean) => void;
-    onStatuses: (callback: (tree: StatusTree) => void) => () => void;
-  };
-}).agentStatus;
+const statusApi = (
+  window as unknown as {
+    agentStatus: {
+      getStatuses: () => Promise<StatusTree>;
+      dismissSession: (id: string) => Promise<StatusTree>;
+      dismissAllDone: () => Promise<StatusTree>;
+      approveAllApproval: () => Promise<ApproveAllApprovalResult>;
+      openSession: (id: string) => Promise<OpenSessionResult>;
+      hideWindow: () => void;
+      setExpanded: (expanded: boolean) => void;
+      onStatuses: (callback: (tree: StatusTree) => void) => () => void;
+    };
+  }
+).agentStatus;
 
 let expanded = false;
 let currentTree: StatusTree | undefined;
 let transientMessage: string | undefined;
 let transientMessageTimer: number | undefined;
+const expandedSessionIds = new Set<string>();
 
 document.addEventListener("DOMContentLoaded", async () => {
   root?.addEventListener("click", (event) => {
@@ -116,6 +161,20 @@ document.addEventListener("DOMContentLoaded", async () => {
   hideWindow?.addEventListener("click", (event) => {
     event.stopPropagation();
     statusApi.hideWindow();
+  });
+
+  dismissAllDone?.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    render(await statusApi.dismissAllDone());
+  });
+
+  approveAllApproval?.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    const result = await statusApi.approveAllApproval();
+    if (result.tree) {
+      render(result.tree);
+    }
+    setTransientMessage(approveResultMessage(result));
   });
 
   statusApi.onStatuses(render);
@@ -152,13 +211,21 @@ function render(tree: StatusTree): void {
 
   if (overallLabel) {
     overallLabel.textContent = `Overall ${stateIcon(tree.overall.state)} ${stateLabel(
-      tree.overall.state
+      tree.overall.state,
     )}`;
   }
 
   if (overallMessage) {
     overallMessage.textContent = transientMessage || summaryText(tree.overall);
   }
+
+  if (approvalModeEl) {
+    approvalModeEl.textContent = `Approval mode: ${approvalModeLabel(
+      tree.overall.approvalMode,
+    )}`;
+  }
+
+  updateBulkActions(tree);
 
   if (!treeEl) {
     return;
@@ -233,6 +300,10 @@ function sessionNode(session: SessionStatus): HTMLElement {
 
   main.append(title, meta);
 
+  if (expandedSessionIds.has(session.id)) {
+    main.append(sessionDetails(session));
+  }
+
   row.append(light, main);
 
   const open = document.createElement("button");
@@ -245,6 +316,24 @@ function sessionNode(session: SessionStatus): HTMLElement {
     await openSession(session, open);
   });
   row.append(open);
+
+  const details = document.createElement("button");
+  details.className = "details-toggle";
+  details.type = "button";
+  details.textContent = expandedSessionIds.has(session.id) ? "Hide Details" : "Details";
+  details.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (expandedSessionIds.has(session.id)) {
+      expandedSessionIds.delete(session.id);
+    } else {
+      expandedSessionIds.add(session.id);
+    }
+
+    if (currentTree) {
+      render(currentTree);
+    }
+  });
+  row.append(details);
 
   const dismiss = document.createElement("button");
   dismiss.className = "dismiss";
@@ -259,7 +348,10 @@ function sessionNode(session: SessionStatus): HTMLElement {
   return row;
 }
 
-async function openSession(session: SessionStatus, button?: HTMLButtonElement): Promise<void> {
+async function openSession(
+  session: SessionStatus,
+  button?: HTMLButtonElement,
+): Promise<void> {
   if (button) {
     button.disabled = true;
   }
@@ -286,10 +378,12 @@ function emptyNode(): HTMLElement {
 
 function summaryText(overall: OverallStatus): string {
   const parts = [
-    overall.waitingApprovalCount ? `${overall.waitingApprovalCount} approval` : "",
+    overall.visibleApprovalRequiredCount
+      ? `${overall.visibleApprovalRequiredCount} approval`
+      : "",
     overall.runningCount ? `${overall.runningCount} running` : "",
     overall.errorCount ? `${overall.errorCount} error` : "",
-    overall.staleCount ? `${overall.staleCount} stale` : ""
+    overall.staleCount ? `${overall.staleCount} stale` : "",
   ].filter(Boolean);
 
   if (parts.length > 0) {
@@ -297,6 +391,38 @@ function summaryText(overall: OverallStatus): string {
   }
 
   return `${overall.projectCount} projects · ${overall.sessionCount} sessions`;
+}
+
+function updateBulkActions(tree: StatusTree): void {
+  const doneCount = tree.overall.doneCount ?? countSessions(tree, "done");
+  const approvalCount =
+    tree.overall.visibleApprovalRequiredCount ??
+    tree.projects.flatMap((project) => project.sessions).filter(isApprovalRequired)
+      .length;
+
+  if (dismissAllDone) {
+    dismissAllDone.textContent = `Dismiss all done (${doneCount})`;
+    dismissAllDone.disabled = doneCount === 0;
+  }
+
+  if (approveAllApproval) {
+    approveAllApproval.textContent = `Approve all approval (${approvalCount})`;
+    approveAllApproval.disabled = approvalCount === 0;
+    approveAllApproval.title =
+      approvalCount === 0
+        ? "No manual approval sessions"
+        : "Approve action is not available yet";
+  }
+}
+
+function countSessions(tree: StatusTree, state: AgentState): number {
+  return tree.projects
+    .flatMap((project) => project.sessions)
+    .filter((session) => session.state === state).length;
+}
+
+function isApprovalRequired(session: SessionStatus): boolean {
+  return session.state === "waiting_approval" && session.approvalRequired === true;
 }
 
 function stateLabel(state: AgentState): string {
@@ -318,13 +444,96 @@ function stateLabel(state: AgentState): string {
 }
 
 function sessionMeta(session: SessionStatus): string {
-  if (session.state === "done") {
-    return `Done · ${formatAgo(Date.now() - (session.lastCompletedAt || session.updatedAt))}`;
+  const duration =
+    session.state === "done"
+      ? formatAgo(Date.now() - (session.lastCompletedAt || session.updatedAt))
+      : formatDuration(Date.now() - session.updatedAt);
+  const reason = session.reasonMessage || session.message;
+  return `${stateLabel(session.state)} · ${duration}${reason ? ` · ${reason}` : ""}`;
+}
+
+function sessionDetails(session: SessionStatus): HTMLElement {
+  const details = document.createElement("div");
+  details.className = "session-details";
+  details.addEventListener("click", (event) => {
+    event.stopPropagation();
+  });
+
+  const rows: Array<[string, string | undefined]> = [
+    ["reasonCode", session.reasonCode],
+    ["reasonMessage", session.reasonMessage],
+    ["lastHookEvent", session.lastHookEvent],
+    [
+      "lastCommandSummary",
+      session.lastCommandSummary || session.commandSummary,
+    ],
+    ["source", session.source],
+    ["updatedAt", new Date(session.updatedAt).toLocaleString()],
+    ["duration", formatDuration(Date.now() - session.updatedAt)],
+    ["projectPath", session.projectPath],
+    [
+      "projectPathExists",
+      typeof session.projectPathExists === "boolean"
+        ? String(session.projectPathExists)
+        : undefined,
+    ],
+    ["lastCwd", session.lastCwd],
+    ["sessionId", session.sessionId],
+    ["approvalMode", session.approvalMode],
+    [
+      "approvalRequired",
+      typeof session.approvalRequired === "boolean"
+        ? String(session.approvalRequired)
+        : undefined,
+    ],
+    ["approvalRequestSummary", session.approvalRequestSummary],
+    ["approvalRequestDetails", session.approvalRequestDetails],
+    ["approvalLastEvent", session.approvalLastEvent],
+  ];
+
+  for (const [label, value] of rows) {
+    if (!value) {
+      continue;
+    }
+
+    const row = document.createElement("div");
+    row.className = "detail-row";
+
+    const key = document.createElement("span");
+    key.className = "detail-key";
+    key.textContent = label;
+
+    const val = document.createElement("span");
+    val.className = "detail-value";
+    val.textContent = value;
+
+    row.append(key, val);
+    details.append(row);
   }
 
-  return `${stateLabel(session.state)} · ${formatDuration(Date.now() - session.updatedAt)}${
-    session.message ? ` · ${session.message}` : ""
-  }`;
+  return details;
+}
+
+function approvalModeLabel(mode: ApprovalMode | undefined): string {
+  switch (mode) {
+    case "manual":
+      return "Manual approval";
+    case "auto":
+      return "Auto approval";
+    case "unknown":
+    default:
+      return "Not reported";
+  }
+}
+
+function approveResultMessage(result: ApproveAllApprovalResult): string {
+  if (!result.ok && result.reasonCode === "approve_action_not_available") {
+    return result.failedCount > 0
+      ? `Approve action is not available yet (${result.failedCount} pending)`
+      : "Approve action is not available yet";
+  }
+
+  return `${result.approvedCount} approved · ${result.failedCount} failed`;
 }
 
 function openTitle(session: SessionStatus): string {
@@ -332,7 +541,7 @@ function openTitle(session: SessionStatus): string {
     return `Open Codex thread: ${session.codexDeepLink}`;
   }
 
-  return "Open Codex app and copy session info";
+  return "Open Codex app";
 }
 
 function resultMessage(result: OpenSessionResult): string {

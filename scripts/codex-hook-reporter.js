@@ -10,11 +10,14 @@ const state = stateArg || "idle";
 const message = messageParts.join(" ") || defaultMessage(state);
 const port = Number(process.env.STATUS_LIGHT_PORT || 8787);
 const logPath =
+  process.env.AGENTWATCH_HOOK_LOG ||
   process.env.AGENT_STATUS_LIGHT_HOOK_LOG ||
   "/Users/leoclaw/Projects/AgentWatch/logs/codex-hook.log";
 
 main().catch((error) => {
-  appendLog(`reporter unexpected error=${error instanceof Error ? error.message : String(error)}`);
+  appendLog(
+    `reporter unexpected error=${error instanceof Error ? error.message : String(error)}`,
+  );
 });
 
 async function main() {
@@ -43,12 +46,21 @@ async function main() {
     text(parsed?.prompt) ||
       text(parsed?.user_prompt) ||
       text(parsed?.message) ||
-      text(parsed?.input)
+      text(parsed?.input),
   );
   const promptSummary = summarizeText(promptText);
-  const commandSummary = commandText(parsed) ? `Run: ${summarizeText(commandText(parsed))}` : undefined;
+  const commandSummary = commandText(parsed)
+    ? `Run: ${summarizeText(commandText(parsed))}`
+    : undefined;
   const title =
-    text(parsed?.title) || (hookEventName === "UserPromptSubmit" ? promptSummary : undefined);
+    text(parsed?.title) ||
+    (hookEventName === "UserPromptSubmit" ? promptSummary : undefined);
+  const normalizedState = hasQuotaLimitSignal(message, parsed)
+    ? "error"
+    : state;
+  const normalizedMessage = hasQuotaLimitSignal(message, parsed)
+    ? quotaLimitMessage(message)
+    : message;
   const payload = {
     agent: "codex",
     projectPath,
@@ -59,24 +71,31 @@ async function main() {
     title,
     firstUserPromptSummary: promptSummary,
     commandSummary,
-    state,
+    lastHookEvent: hookEventName,
+    lastCommandSummary: commandSummary,
+    lastCwd: cwd,
+    state: normalizedState,
     source: "codex-hook",
-    message,
+    message: normalizedMessage,
     codexSessionId,
     codexThreadId,
-    codexDeepLink: codexThreadId ? `codex://threads/${codexThreadId}` : undefined,
-    raw: summarizeHookPayload(parsed, stdin)
+    codexDeepLink: codexThreadId
+      ? `codex://threads/${codexThreadId}`
+      : undefined,
+    raw: summarizeHookPayload(parsed, stdin),
   };
 
   appendLog(
-    `hook invoked state=${state} source=codex-hook message=${JSON.stringify(message)} cwd=${cwd}`
+    `hook invoked state=${state} source=codex-hook message=${JSON.stringify(message)} cwd=${cwd}`,
   );
 
   try {
     const body = await postStatus(payload);
     appendLog(`status updated response=${body}`);
   } catch (error) {
-    appendLog(`status update failed error=${error instanceof Error ? error.message : String(error)}`);
+    appendLog(
+      `status update failed error=${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 
@@ -111,7 +130,9 @@ function parseJson(raw) {
 
 function summarizeHookPayload(parsed, raw) {
   if (!parsed || typeof parsed !== "object") {
-    return raw.trim() ? { parseError: true, stdinPreview: raw.slice(0, 500) } : undefined;
+    return raw.trim()
+      ? { parseError: true, stdinPreview: raw.slice(0, 500) }
+      : undefined;
   }
 
   return {
@@ -123,10 +144,25 @@ function summarizeHookPayload(parsed, raw) {
     threadId: parsed.threadId,
     conversation_id: parsed.conversation_id,
     conversationId: parsed.conversationId,
-    session_meta_payload_id: readPath(parsed, ["session_meta", "payload", "id"]),
+    session_meta_payload_id: readPath(parsed, [
+      "session_meta",
+      "payload",
+      "id",
+    ]),
     tool_name: parsed.tool_name,
     command: parsed.command,
-    permission_request: parsed.permission_request ? true : undefined
+    error: parsed.error,
+    errors: parsed.errors,
+    message: parsed.message,
+    reason: parsed.reason,
+    status: parsed.status,
+    stderr: parsed.stderr,
+    stdout: parsed.stdout,
+    output: parsed.output,
+    detail: parsed.detail,
+    details: parsed.details,
+    code: parsed.code,
+    permission_request: parsed.permission_request ? true : undefined,
   };
 }
 
@@ -138,7 +174,7 @@ function extractCodexThreadId(parsed) {
     text(parsed?.session_id),
     text(parsed?.sessionId),
     text(parsed?.conversation_id),
-    text(parsed?.conversationId)
+    text(parsed?.conversationId),
   ];
 
   return candidates.find(isUuid);
@@ -158,7 +194,9 @@ function extractCodexSessionId(parsed) {
 function isUuid(value) {
   return (
     typeof value === "string" &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      value,
+    )
   );
 }
 
@@ -179,7 +217,11 @@ function text(value) {
 }
 
 function commandText(parsed) {
-  return text(parsed?.command) || text(parsed?.tool_input?.command) || text(parsed?.input?.command);
+  return (
+    text(parsed?.command) ||
+    text(parsed?.tool_input?.command) ||
+    text(parsed?.input?.command)
+  );
 }
 
 function isIgnoredProjectPath(cwd) {
@@ -189,12 +231,15 @@ function isIgnoredProjectPath(cwd) {
   }
 
   return ignoredPathPrefixes().some(
-    (prefix) => candidate === prefix || candidate.startsWith(`${prefix}${path.sep}`)
+    (prefix) =>
+      candidate === prefix || candidate.startsWith(`${prefix}${path.sep}`),
   );
 }
 
 function ignoredPathPrefixes() {
-  const configured = text(process.env.AGENT_STATUS_LIGHT_IGNORE_PATHS);
+  const configured =
+    text(process.env.AGENTWATCH_IGNORE_PATHS) ||
+    text(process.env.AGENT_STATUS_LIGHT_IGNORE_PATHS);
   if (configured) {
     return configured
       .split(path.delimiter)
@@ -223,7 +268,9 @@ function extractUserPromptText(value) {
   const requestMarker = /(?:^|\n)##\s*My request for Codex:\s*/i;
   const requestMatch = candidate.match(requestMarker);
   if (requestMatch && typeof requestMatch.index === "number") {
-    return cleanPromptText(candidate.slice(requestMatch.index + requestMatch[0].length));
+    return cleanPromptText(
+      candidate.slice(requestMatch.index + requestMatch[0].length),
+    );
   }
 
   return cleanPromptText(candidate);
@@ -251,22 +298,26 @@ function postStatus(body) {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Content-Length": Buffer.byteLength(data)
+          "Content-Length": Buffer.byteLength(data),
         },
-        timeout: 1500
+        timeout: 1500,
       },
       (response) => {
         const chunks = [];
         response.on("data", (chunk) => chunks.push(chunk));
         response.on("end", () => {
           const responseBody = Buffer.concat(chunks).toString("utf8");
-          if (response.statusCode && response.statusCode >= 200 && response.statusCode < 300) {
+          if (
+            response.statusCode &&
+            response.statusCode >= 200 &&
+            response.statusCode < 300
+          ) {
             resolve(responseBody);
           } else {
             reject(new Error(`HTTP ${response.statusCode}: ${responseBody}`));
           }
         });
-      }
+      },
     );
 
     request.on("timeout", () => {
@@ -302,4 +353,80 @@ function defaultMessage(nextState) {
     default:
       return "Codex is idle";
   }
+}
+
+function hasQuotaLimitSignal(message, parsed) {
+  const candidates = [text(message), ...quotaSignalStrings(parsed)].filter(
+    Boolean,
+  );
+  return candidates.some(isQuotaLimitText);
+}
+
+function quotaSignalStrings(value, parentKey = "", depth = 0) {
+  if (depth > 5 || value === undefined || value === null) {
+    return [];
+  }
+
+  if (typeof value === "string") {
+    return isQuotaSignalKey(parentKey) ? [value] : [];
+  }
+
+  if (Array.isArray(value)) {
+    return value.flatMap((item) =>
+      quotaSignalStrings(item, parentKey, depth + 1),
+    );
+  }
+
+  if (typeof value !== "object") {
+    return [];
+  }
+
+  return Object.entries(value).flatMap(([key, child]) =>
+    quotaSignalStrings(child, key, depth + 1),
+  );
+}
+
+function isQuotaSignalKey(key) {
+  const normalized = key.toLowerCase();
+  return [
+    "error",
+    "errors",
+    "exception",
+    "message",
+    "reason",
+    "status",
+    "stderr",
+    "stdout",
+    "output",
+    "detail",
+    "details",
+    "code",
+    "last_error",
+    "lastError",
+  ].some((signalKey) => normalized === signalKey.toLowerCase());
+}
+
+function isQuotaLimitText(value) {
+  if (!value) {
+    return false;
+  }
+
+  const normalized = value.toLowerCase();
+  return [
+    /quota.{0,40}(exceeded|exhausted|limit|used up|reached)/,
+    /(exceeded|exhausted|reached).{0,40}quota/,
+    /usage.{0,40}(limit|exceeded|exhausted|reached)/,
+    /(limit|rate limit).{0,40}(exceeded|reached)/,
+    /insufficient.{0,20}(quota|credits|balance)/,
+    /out of.{0,20}(quota|credits)/,
+    /额度.{0,20}(用完|耗尽|不足|达到|超出|限制)/,
+    /(用完|耗尽|不足|达到|超出).{0,20}额度/,
+  ].some((pattern) => pattern.test(normalized));
+}
+
+function quotaLimitMessage(message) {
+  const explicitMessage = text(message);
+  return isQuotaLimitText(explicitMessage)
+    ? explicitMessage
+    : "Codex quota or usage limit reached";
 }

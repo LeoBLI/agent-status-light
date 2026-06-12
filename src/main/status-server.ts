@@ -7,6 +7,7 @@ import { URL } from "node:url";
 import { promisify } from "node:util";
 import {
   AgentState,
+  ApprovalMode,
   AppConfig,
   Diagnostics,
   OpenSessionResult,
@@ -17,13 +18,13 @@ import {
   StatusUpdateInput,
   VALID_SOURCES,
   VALID_STATES,
-  emptyCounts
+  emptyCounts,
 } from "../shared/types";
 import {
   codexThreadDeepLink,
   enrichFromCodexSessionIndex,
   getCodexSessionIndexDiagnostics,
-  isCodexThreadId
+  isCodexThreadId,
 } from "./codex-session-index";
 
 const execFileAsync = promisify(execFile);
@@ -43,7 +44,10 @@ interface StatusStoreOptions {
 
 interface SessionTimers {
   stale?: NodeJS.Timeout;
+  approval?: NodeJS.Timeout;
 }
+
+const APPROVAL_GRACE_MS = 1500;
 
 export class StatusStore extends EventEmitter {
   private readonly sessions = new Map<string, SessionStatus>();
@@ -71,7 +75,7 @@ export class StatusStore extends EventEmitter {
 
   override on<K extends keyof StatusEvents>(
     eventName: K,
-    listener: (...args: StatusEvents[K]) => void
+    listener: (...args: StatusEvents[K]) => void,
   ): this {
     return super.on(eventName, listener);
   }
@@ -83,13 +87,14 @@ export class StatusStore extends EventEmitter {
   getStatuses(includeHidden = false): StatusTree {
     const projectsById = new Map<string, SessionStatus[]>();
 
-    for (const session of this.sessions.values()) {
+    for (const storedSession of this.sessions.values()) {
+      const session = withFreshProjectPathExists(storedSession);
       if (!includeHidden && session.visibility === "dismissed") {
         continue;
       }
 
       const projectSessions = projectsById.get(session.projectId) ?? [];
-      projectSessions.push({ ...session });
+      projectSessions.push(session);
       projectsById.set(session.projectId, projectSessions);
     }
 
@@ -104,19 +109,25 @@ export class StatusStore extends EventEmitter {
           projectName: representative.projectName,
           projectPath: representative.projectPath,
           state: highestState(sortedSessions.map((session) => session.state)),
-          updatedAt: Math.max(...sortedSessions.map((session) => session.updatedAt)),
+          updatedAt: Math.max(
+            ...sortedSessions.map((session) => session.updatedAt),
+          ),
           sessions: sortedSessions,
-          counts
+          counts,
         };
-      }
+      },
     );
 
     projects.sort(compareProjectStateThenUpdatedAt);
 
-    const allSessions = Array.from(this.sessions.values()).filter(
-      (session) => includeHidden || session.visibility !== "dismissed"
-    );
+    const allSessions = Array.from(this.sessions.values())
+      .map(withFreshProjectPathExists)
+      .filter((session) => includeHidden || session.visibility !== "dismissed");
     const overallCounts = countStates(allSessions);
+    const approvalMode = approvalModeForSessions(allSessions);
+    const visibleApprovalRequiredCount = allSessions.filter(
+      isManualApprovalRequired,
+    ).length;
 
     return {
       overall: {
@@ -129,16 +140,19 @@ export class StatusStore extends EventEmitter {
         projectCount: projects.length,
         sessionCount: allSessions.length,
         waitingApprovalCount: overallCounts.waiting_approval,
+        approvalMode,
+        visibleApprovalRequiredCount,
+        doneCount: overallCounts.done,
         runningCount: overallCounts.running,
         errorCount: overallCounts.error,
-        staleCount: overallCounts.stale
+        staleCount: overallCounts.stale,
       },
-      projects
+      projects,
     };
   }
 
   getSessions(): SessionStatus[] {
-    return Array.from(this.sessions.values()).map((session) => ({ ...session }));
+    return Array.from(this.sessions.values()).map(withFreshProjectPathExists);
   }
 
   getEvents(): SessionStatus[] {
@@ -146,10 +160,22 @@ export class StatusStore extends EventEmitter {
   }
 
   getDiagnostics(): Diagnostics {
-    const hookEvents = this.events.filter((event) => event.source === "codex-hook");
+    const hookEvents = this.events.filter(
+      (event) => event.source === "codex-hook",
+    );
     const lastHookEvent = hookEvents.at(-1);
     const now = Date.now();
     const tenMinutesMs = 10 * 60 * 1000;
+
+    const visibleSessions = this.getSessions().filter(
+      (session) => session.visibility !== "dismissed",
+    );
+    const visibleApprovalRequiredCount = visibleSessions.filter(
+      isManualApprovalRequired,
+    ).length;
+    const autoApprovalEventCount = this.events.filter(
+      (session) => session.approvalMode === "auto",
+    ).length;
 
     return {
       ok: true,
@@ -160,22 +186,48 @@ export class StatusStore extends EventEmitter {
         lastHookEventAt: lastHookEvent?.updatedAt,
         lastHookState: lastHookEvent?.state,
         isHookRecentlyActive: Boolean(
-          lastHookEvent && now - lastHookEvent.updatedAt <= tenMinutesMs
-        )
+          lastHookEvent && now - lastHookEvent.updatedAt <= tenMinutesMs,
+        ),
       },
       eventsCount: this.events.length,
       autoTransitions: {
         doneDisplayMs: 0,
-        staleTimeoutMs: this.staleTimeoutMs
+        staleTimeoutMs: this.staleTimeoutMs,
       },
+      stateSemantics: {
+        doneAutoDismiss: false,
+        postToolUseMarksDone: false,
+        staleTimeoutMs: this.staleTimeoutMs,
+        missingPathCleanupAvailable: true,
+      },
+      visibleWaitingApprovalCount: visibleSessions.filter(
+        (session) => session.state === "waiting_approval",
+      ).length,
+      approvalMode: approvalModeForSessions(visibleSessions),
+      visibleApprovalRequiredCount,
+      autoApprovalEventCount,
+      manualApprovalRequiredCount: visibleApprovalRequiredCount,
+      dismissAllDoneAvailable: true,
+      detailsPanelAvailable: true,
+      approveAllApprovalAvailable: false,
+      approveActionReason: "approve_action_not_available",
+      visibleStaleCount: visibleSessions.filter(
+        (session) => session.state === "stale",
+      ).length,
+      visibleErrorCount: visibleSessions.filter(
+        (session) => session.state === "error",
+      ).length,
+      missingProjectPathSessionCount: visibleSessions.filter(
+        (session) => session.projectPath && session.projectPathExists === false,
+      ).length,
       codexOpenSupport: {
         appName: this.codexAppName,
         bundleId: this.codexBundleId,
         deeplinkScheme: "codex://",
         sessionIndexFound: getCodexSessionIndexDiagnostics().found,
         sessionIndexPath: getCodexSessionIndexDiagnostics().path,
-        threadDeepLinkSupport: "best-effort"
-      }
+        threadDeepLinkSupport: "best-effort",
+      },
     };
   }
 
@@ -188,6 +240,25 @@ export class StatusStore extends EventEmitter {
     const previous = this.sessions.get(session.id);
     const next = this.withCodexOpenTarget(this.mergeSession(session, previous));
 
+    if (shouldDelayApprovalEscalation(input, next)) {
+      const pending = this.withCodexOpenTarget(
+        this.mergeSession(pendingApprovalSession(next), previous),
+      );
+      this.applySession(pending, previous);
+      this.dismissLegacyDefaultSessions(pending);
+      this.scheduleApprovalEscalation(pending, next);
+      this.scheduleAutomaticTransitions(pending);
+
+      const tree = this.getStatuses();
+      return {
+        session: pending,
+        project: tree.projects.find(
+          (project) => project.projectId === pending.projectId,
+        ),
+        overall: tree.overall,
+      };
+    }
+
     this.applySession(next, previous);
     this.dismissLegacyDefaultSessions(next);
     this.scheduleAutomaticTransitions(next);
@@ -195,8 +266,10 @@ export class StatusStore extends EventEmitter {
     const tree = this.getStatuses();
     return {
       session: next,
-      project: tree.projects.find((project) => project.projectId === next.projectId),
-      overall: tree.overall
+      project: tree.projects.find(
+        (project) => project.projectId === next.projectId,
+      ),
+      overall: tree.overall,
     };
   }
 
@@ -208,7 +281,7 @@ export class StatusStore extends EventEmitter {
         opened: false,
         strategy: "failed",
         fallbackUsed: false,
-        message: "Session not found."
+        message: "Session not found.",
       };
     }
 
@@ -216,17 +289,24 @@ export class StatusStore extends EventEmitter {
 
     if (deeplink) {
       try {
-        await openCodexDeepLink(deeplink, this.codexBundleId, this.codexAppName);
+        await openCodexDeepLink(
+          deeplink,
+          this.codexBundleId,
+          this.codexAppName,
+        );
         return {
           ok: true,
           opened: true,
           strategy: "deeplink",
           target: deeplink,
           fallbackUsed: false,
-          message: "Opened Codex thread deeplink."
+          message: "Opened Codex thread deeplink.",
         };
       } catch {
-        const fallback = await openCodexApp(this.codexAppName, this.codexBundleId);
+        const fallback = await openCodexApp(
+          this.codexAppName,
+          this.codexBundleId,
+        );
         return {
           ok: fallback,
           opened: fallback,
@@ -235,7 +315,7 @@ export class StatusStore extends EventEmitter {
           fallbackUsed: true,
           message: fallback
             ? "Opened Codex app. Exact thread deeplink was unavailable."
-            : "Could not open Codex automatically."
+            : "Could not open Codex automatically.",
         };
       }
     }
@@ -249,18 +329,22 @@ export class StatusStore extends EventEmitter {
       fallbackUsed: true,
       message: opened
         ? "Opened Codex app. Exact thread deeplink was unavailable."
-        : "Could not open Codex automatically."
+        : "Could not open Codex automatically.",
     };
   }
 
-  deleteSession(id: string): { deletedCount: number; deletedSessionIds: string[]; tree: StatusTree } {
+  deleteSession(id: string): {
+    deletedCount: number;
+    deletedSessionIds: string[];
+    tree: StatusTree;
+  } {
     const existed = this.sessions.has(id);
     this.clearTimers(id);
     this.sessions.delete(id);
     return {
       deletedCount: existed ? 1 : 0,
       deletedSessionIds: existed ? [id] : [],
-      tree: this.getStatuses()
+      tree: this.getStatuses(),
     };
   }
 
@@ -282,7 +366,7 @@ export class StatusStore extends EventEmitter {
     return {
       deletedCount: deletedSessionIds.length,
       deletedSessionIds,
-      tree: this.getStatuses()
+      tree: this.getStatuses(),
     };
   }
 
@@ -294,7 +378,12 @@ export class StatusStore extends EventEmitter {
   } {
     const session = this.sessions.get(id);
     if (!session) {
-      return { ok: true, dismissedCount: 0, dismissedSessionIds: [], tree: this.getStatuses() };
+      return {
+        ok: true,
+        dismissedCount: 0,
+        dismissedSessionIds: [],
+        tree: this.getStatuses(),
+      };
     }
 
     const previous = { ...session };
@@ -302,14 +391,22 @@ export class StatusStore extends EventEmitter {
       ...session,
       visibility: "dismissed" as const,
       dismissedAt: Date.now(),
-      updatedAt: Date.now()
+      updatedAt: Date.now(),
     };
 
     this.applySession(next, previous);
-    return { ok: true, dismissedCount: 1, dismissedSessionIds: [id], tree: this.getStatuses() };
+    return {
+      ok: true,
+      dismissedCount: 1,
+      dismissedSessionIds: [id],
+      tree: this.getStatuses(),
+    };
   }
 
-  updateSessionTitle(id: string, title: string): {
+  updateSessionTitle(
+    id: string,
+    title: string,
+  ): {
     ok: true;
     updatedCount: number;
     session?: SessionStatus;
@@ -329,15 +426,23 @@ export class StatusStore extends EventEmitter {
       title,
       sessionName: title,
       displayTitle: title,
-      updatedAt: Date.now()
+      updatedAt: Date.now(),
     });
 
     this.applySession(next, previous);
     this.scheduleAutomaticTransitions(next);
-    return { ok: true, updatedCount: 1, session: next, tree: this.getStatuses() };
+    return {
+      ok: true,
+      updatedCount: 1,
+      session: next,
+      tree: this.getStatuses(),
+    };
   }
 
-  updateProjectName(projectId: string, projectName: string): {
+  updateProjectName(
+    projectId: string,
+    projectName: string,
+  ): {
     ok: true;
     updatedCount: number;
     project?: ProjectStatus;
@@ -353,7 +458,7 @@ export class StatusStore extends EventEmitter {
         const next = {
           ...session,
           projectName,
-          updatedAt: Date.now()
+          updatedAt: Date.now(),
         };
         this.applySession(next, previous);
         this.scheduleAutomaticTransitions(next);
@@ -366,7 +471,7 @@ export class StatusStore extends EventEmitter {
       ok: true,
       updatedCount,
       project: tree.projects.find((project) => project.projectId === projectId),
-      tree
+      tree,
     };
   }
 
@@ -379,13 +484,16 @@ export class StatusStore extends EventEmitter {
     const dismissedSessionIds: string[] = [];
 
     for (const session of this.sessions.values()) {
-      if (session.projectId === projectId && session.visibility !== "dismissed") {
+      if (
+        session.projectId === projectId &&
+        session.visibility !== "dismissed"
+      ) {
         const previous = { ...session };
         const next = {
           ...session,
           visibility: "dismissed" as const,
           dismissedAt: Date.now(),
-          updatedAt: Date.now()
+          updatedAt: Date.now(),
         };
         this.applySession(next, previous);
         dismissedSessionIds.push(session.id);
@@ -396,11 +504,78 @@ export class StatusStore extends EventEmitter {
       ok: true,
       dismissedCount: dismissedSessionIds.length,
       dismissedSessionIds,
-      tree: this.getStatuses()
+      tree: this.getStatuses(),
     };
   }
 
-  clearDone(): { ok: true; dismissedCount: number; dismissedSessionIds: string[]; tree: StatusTree } {
+  dismissProjectPath(projectPath: string): {
+    ok: true;
+    dismissedCount: number;
+    dismissedSessionIds: string[];
+    tree: StatusTree;
+  } {
+    return this.dismissMatchingSessions(
+      (session) =>
+        session.projectPath === projectPath &&
+        session.visibility !== "dismissed",
+    );
+  }
+
+  cleanupMissingPaths(): {
+    ok: true;
+    dismissedCount: number;
+    dismissedSessionIds: string[];
+    tree: StatusTree;
+  } {
+    return this.dismissMatchingSessions(
+      (session) =>
+        Boolean(session.projectPath) &&
+        session.visibility !== "dismissed" &&
+        projectPathExists(session.projectPath) === false,
+    );
+  }
+
+  private dismissMatchingSessions(
+    predicate: (session: SessionStatus) => boolean,
+  ): {
+    ok: true;
+    dismissedCount: number;
+    dismissedSessionIds: string[];
+    tree: StatusTree;
+  } {
+    const dismissedSessionIds: string[] = [];
+
+    for (const session of this.sessions.values()) {
+      if (predicate(session)) {
+        const previous = { ...session };
+        const next = {
+          ...session,
+          projectPathExists: session.projectPath
+            ? projectPathExists(session.projectPath)
+            : undefined,
+          visibility: "dismissed" as const,
+          dismissedAt: Date.now(),
+          updatedAt: Date.now(),
+        };
+        this.applySession(next, previous);
+        dismissedSessionIds.push(session.id);
+      }
+    }
+
+    return {
+      ok: true,
+      dismissedCount: dismissedSessionIds.length,
+      dismissedSessionIds,
+      tree: this.getStatuses(),
+    };
+  }
+
+  clearDone(): {
+    ok: true;
+    dismissedCount: number;
+    dismissedSessionIds: string[];
+    tree: StatusTree;
+  } {
     const dismissedSessionIds: string[] = [];
 
     for (const session of this.sessions.values()) {
@@ -410,7 +585,7 @@ export class StatusStore extends EventEmitter {
           ...session,
           visibility: "dismissed" as const,
           dismissedAt: Date.now(),
-          updatedAt: Date.now()
+          updatedAt: Date.now(),
         };
         this.applySession(next, previous);
         dismissedSessionIds.push(session.id);
@@ -421,27 +596,67 @@ export class StatusStore extends EventEmitter {
       ok: true,
       dismissedCount: dismissedSessionIds.length,
       dismissedSessionIds,
-      tree: this.getStatuses()
+      tree: this.getStatuses(),
+    };
+  }
+
+  approveAllApproval(): {
+    ok: false;
+    reasonCode: "approve_action_not_available";
+    reasonMessage: string;
+    approvedCount: number;
+    failedCount: number;
+    results: Array<{
+      sessionId: string;
+      ok: false;
+      reasonCode: "approve_action_not_available";
+      reasonMessage: string;
+    }>;
+    tree: StatusTree;
+  } {
+    const reasonMessage = "Approve action is not available yet";
+    const sessions = this.getSessions().filter(isManualApprovalRequired);
+
+    return {
+      ok: false,
+      reasonCode: "approve_action_not_available",
+      reasonMessage,
+      approvedCount: 0,
+      failedCount: sessions.length,
+      results: sessions.map((session) => ({
+        sessionId: session.id,
+        ok: false,
+        reasonCode: "approve_action_not_available",
+        reasonMessage,
+      })),
+      tree: this.getStatuses(),
     };
   }
 
   private normalizeInput(input: StatusUpdateInput): SessionStatus {
     if (!input.state || !VALID_STATES.includes(input.state)) {
-      throw new Error(`Invalid state. Expected one of: ${VALID_STATES.join(", ")}`);
+      throw new Error(
+        `Invalid state. Expected one of: ${VALID_STATES.join(", ")}`,
+      );
     }
 
     const raw = asRecord(input.raw);
     const projectPath = text(input.projectPath) || text(raw?.cwd);
     const projectValue = text(input.project);
     const projectId =
-      text(input.projectId) || projectPath || projectValue || text(raw?.cwd) || "unknown-project";
+      text(input.projectId) ||
+      projectPath ||
+      projectValue ||
+      text(raw?.cwd) ||
+      "unknown-project";
     const inferredProjectName =
       text(input.projectName) ||
       displayNameFromProject(projectValue) ||
       displayNameFromProject(projectPath) ||
       projectValue ||
       "Unknown Project";
-    const projectName = this.projectNameOverrides.get(projectId) || inferredProjectName;
+    const projectName =
+      this.projectNameOverrides.get(projectId) || inferredProjectName;
     const sessionId =
       text(input.sessionId) ||
       text(input.taskId) ||
@@ -453,11 +668,48 @@ export class StatusStore extends EventEmitter {
       text(raw?.conversationId) ||
       `${projectId}::default-session`;
     const id = `${projectId}::${sessionId}`;
-    const title = text(input.title) || text(raw?.title) || this.titleOverrides.get(id);
+    const title =
+      text(input.title) || text(raw?.title) || this.titleOverrides.get(id);
     const sessionName = text(input.sessionName) || title || undefined;
     const source =
-      input.source && VALID_SOURCES.includes(input.source) ? input.source : "manual";
+      input.source && VALID_SOURCES.includes(input.source)
+        ? input.source
+        : "manual";
     const now = Date.now();
+    const quotaLimited = hasQuotaLimitSignal(input, raw);
+    const lastHookEvent =
+      text(input.lastHookEvent) || text(raw?.hook_event_name);
+    const lastCommandSummary =
+      text(input.lastCommandSummary) ||
+      text(input.commandSummary) ||
+      commandSummaryFromRaw(raw);
+    const approval = approvalMetadataForInput({
+      input,
+      raw,
+      requestedState: input.state,
+      lastHookEvent,
+      lastCommandSummary,
+    });
+    const state = quotaLimited
+      ? "error"
+      : input.state === "waiting_approval" && !approval.approvalRequired
+        ? "running"
+        : input.state;
+    const message = quotaLimited
+      ? quotaLimitMessage(input.message)
+      : input.state === "waiting_approval" && !approval.approvalRequired
+        ? text(input.message) || "Auto approval event recorded"
+      : text(input.message) || defaultMessage(state);
+    const lastCwd = text(input.lastCwd) || text(raw?.cwd) || projectPath;
+    const reason = reasonForStatus({
+      state,
+      message,
+      reasonCode: input.reasonCode,
+      reasonMessage: input.reasonMessage,
+      lastHookEvent,
+      lastCommandSummary,
+      approvalRequired: approval.approvalRequired,
+    });
 
     return {
       id,
@@ -469,32 +721,70 @@ export class StatusStore extends EventEmitter {
       sessionName,
       title,
       firstUserPromptSummary: text(input.firstUserPromptSummary),
-      commandSummary: text(input.commandSummary),
-      state: input.state,
+      commandSummary: text(input.commandSummary) || lastCommandSummary,
+      state,
       source,
-      message: text(input.message) || defaultMessage(input.state),
+      message,
+      reasonCode: reason.reasonCode,
+      reasonMessage: reason.reasonMessage,
+      lastHookEvent,
+      lastCommandSummary,
+      lastCwd,
+      projectPathExists:
+        typeof input.projectPathExists === "boolean"
+          ? input.projectPathExists
+          : projectPath
+            ? projectPathExists(projectPath)
+            : undefined,
+      approvalMode: approval.approvalMode,
+      approvalRequired: approval.approvalRequired,
+      approvalRequestSummary: approval.approvalRequestSummary,
+      approvalRequestDetails: approval.approvalRequestDetails,
+      approvalLastEvent: approval.approvalLastEvent,
       updatedAt: now,
       createdAt: now,
       visibility: "visible",
       codexThreadId: pickCodexThreadId(input, raw),
       codexSessionId: pickCodexSessionId(input, raw),
-      codexSessionPath: text(input.codexSessionPath) || text(raw?.codexSessionPath),
-      codexDeepLink: cleanCodexDeepLink(text(input.codexDeepLink) || text(raw?.codexDeepLink)),
-      raw: input.raw
+      codexSessionPath:
+        text(input.codexSessionPath) || text(raw?.codexSessionPath),
+      codexDeepLink: cleanCodexDeepLink(
+        text(input.codexDeepLink) || text(raw?.codexDeepLink),
+      ),
+      raw: input.raw,
     };
   }
 
-  private mergeSession(next: SessionStatus, previous: SessionStatus | undefined): SessionStatus {
+  private mergeSession(
+    next: SessionStatus,
+    previous: SessionStatus | undefined,
+  ): SessionStatus {
     const merged: SessionStatus = {
       ...previous,
       ...next,
       createdAt: previous?.createdAt ?? next.createdAt,
-      projectName: next.projectName || previous?.projectName || "Unknown Project",
+      projectName:
+        next.projectName || previous?.projectName || "Unknown Project",
       projectPath: next.projectPath ?? previous?.projectPath,
       sessionName: next.sessionName ?? previous?.sessionName,
       title: next.title ?? previous?.title,
-      firstUserPromptSummary: next.firstUserPromptSummary ?? previous?.firstUserPromptSummary,
+      firstUserPromptSummary:
+        next.firstUserPromptSummary ?? previous?.firstUserPromptSummary,
       commandSummary: next.commandSummary ?? previous?.commandSummary,
+      reasonCode: next.reasonCode ?? previous?.reasonCode,
+      reasonMessage: next.reasonMessage ?? previous?.reasonMessage,
+      lastHookEvent: next.lastHookEvent ?? previous?.lastHookEvent,
+      lastCommandSummary:
+        next.lastCommandSummary ?? previous?.lastCommandSummary,
+      lastCwd: next.lastCwd ?? previous?.lastCwd,
+      projectPathExists: next.projectPathExists ?? previous?.projectPathExists,
+      approvalMode: next.approvalMode ?? previous?.approvalMode,
+      approvalRequired: next.approvalRequired ?? previous?.approvalRequired,
+      approvalRequestSummary:
+        next.approvalRequestSummary ?? previous?.approvalRequestSummary,
+      approvalRequestDetails:
+        next.approvalRequestDetails ?? previous?.approvalRequestDetails,
+      approvalLastEvent: next.approvalLastEvent ?? previous?.approvalLastEvent,
       visibility: previous?.visibility ?? next.visibility ?? "visible",
       dismissedAt: previous?.dismissedAt,
       lastCompletedAt: previous?.lastCompletedAt,
@@ -503,7 +793,7 @@ export class StatusStore extends EventEmitter {
       codexSessionId: next.codexSessionId ?? previous?.codexSessionId,
       codexSessionPath: next.codexSessionPath ?? previous?.codexSessionPath,
       codexDeepLink: next.codexDeepLink ?? previous?.codexDeepLink,
-      openTarget: next.openTarget ?? previous?.openTarget
+      openTarget: next.openTarget ?? previous?.openTarget,
     };
 
     if (shouldRedisplay(next, previous)) {
@@ -511,11 +801,16 @@ export class StatusStore extends EventEmitter {
       delete merged.dismissedAt;
     }
 
+    if (next.state === "idle") {
+      merged.visibility = "dismissed";
+      merged.dismissedAt = next.updatedAt;
+    }
+
     if (next.state === "done") {
       merged.lastCompletedAt = next.updatedAt;
     }
 
-    if (next.state === "waiting_approval") {
+    if (next.state === "waiting_approval" && next.approvalRequired === true) {
       merged.lastApprovalAt = next.updatedAt;
     }
 
@@ -539,18 +834,21 @@ export class StatusStore extends EventEmitter {
       codexDeepLink,
       openTarget: codexDeepLink
         ? {
-            type: "codex-thread",
-            url: codexDeepLink
+            type: "codex-thread" as const,
+            url: codexDeepLink,
           }
         : {
-            type: "codex-app",
+            type: "codex-app" as const,
             appName: this.codexAppName,
-            fallbackReason: "Exact thread deeplink unavailable."
-          }
+            fallbackReason: "Exact thread deeplink unavailable.",
+          },
     });
   }
 
-  private applySession(next: SessionStatus, previous: SessionStatus | undefined): void {
+  private applySession(
+    next: SessionStatus,
+    previous: SessionStatus | undefined,
+  ): void {
     this.clearTimers(next.id);
     this.sessions.set(next.id, next);
     this.events.push({ ...next });
@@ -559,7 +857,12 @@ export class StatusStore extends EventEmitter {
       this.events.splice(0, this.events.length - 500);
     }
 
-    this.emit("status", this.getStatuses(), { ...next }, previous ? { ...previous } : undefined);
+    this.emit(
+      "status",
+      this.getStatuses(),
+      { ...next },
+      previous ? { ...previous } : undefined,
+    );
   }
 
   private dismissLegacyDefaultSessions(next: SessionStatus): void {
@@ -581,7 +884,7 @@ export class StatusStore extends EventEmitter {
           ...session,
           visibility: "dismissed" as const,
           dismissedAt: next.updatedAt,
-          updatedAt: next.updatedAt
+          updatedAt: next.updatedAt,
         };
         this.applySession(dismissed, previous);
       }
@@ -590,28 +893,89 @@ export class StatusStore extends EventEmitter {
 
   private scheduleAutomaticTransitions(session: SessionStatus): void {
     if (session.state === "running") {
-      this.setTimer(session.id, "stale", () => {
-        const current = this.sessions.get(session.id);
-        if (current?.state === "running" && current.updatedAt === session.updatedAt) {
-          this.update({
-            agent: current.agent,
-            projectId: current.projectId,
-            projectName: current.projectName,
-            projectPath: current.projectPath,
-            sessionId: current.sessionId,
-            sessionName: current.sessionName,
-            title: current.title,
-            state: "stale",
-            source: "system",
-            message: "No status update received recently",
-            raw: current.raw
-          });
-        }
-      }, this.staleTimeoutMs);
+      this.setTimer(
+        session.id,
+        "stale",
+        () => {
+          const current = this.sessions.get(session.id);
+          if (
+            current?.state === "running" &&
+            current.updatedAt === session.updatedAt
+          ) {
+            const quotaLimited = hasQuotaLimitSignal(
+              current,
+              asRecord(current.raw),
+            );
+            this.update({
+              agent: current.agent,
+              projectId: current.projectId,
+              projectName: current.projectName,
+              projectPath: current.projectPath,
+              sessionId: current.sessionId,
+              sessionName: current.sessionName,
+              title: current.title,
+              state: quotaLimited ? "error" : "stale",
+              source: "system",
+              message: quotaLimited
+                ? "Codex quota or usage limit reached"
+                : "No status update after running",
+              lastHookEvent: current.lastHookEvent,
+              lastCommandSummary:
+                current.lastCommandSummary || current.commandSummary,
+              lastCwd: current.lastCwd,
+              approvalMode: current.approvalMode,
+              approvalRequired: current.approvalRequired,
+              approvalRequestSummary: current.approvalRequestSummary,
+              approvalRequestDetails: current.approvalRequestDetails,
+              approvalLastEvent: current.approvalLastEvent,
+              raw: current.raw,
+            });
+          }
+        },
+        this.staleTimeoutMs,
+      );
     }
   }
 
-  private setTimer(id: string, key: keyof SessionTimers, callback: () => void, delayMs: number): void {
+  private scheduleApprovalEscalation(
+    pending: SessionStatus,
+    approval: SessionStatus,
+  ): void {
+    this.setTimer(
+      pending.id,
+      "approval",
+      () => {
+        const current = this.sessions.get(pending.id);
+        if (
+          current?.updatedAt === pending.updatedAt &&
+          current.state === "running" &&
+          current.approvalLastEvent === "PermissionRequest"
+        ) {
+          const previous = { ...current };
+          const next = this.withCodexOpenTarget(
+            this.mergeSession(
+              {
+                ...approval,
+                updatedAt: Date.now(),
+                visibility: "visible",
+              },
+              current,
+            ),
+          );
+          this.applySession(next, previous);
+          this.dismissLegacyDefaultSessions(next);
+        }
+      },
+      APPROVAL_GRACE_MS,
+    );
+  }
+
+  private setTimer(
+    id: string,
+    key: keyof SessionTimers,
+    callback: () => void,
+    delayMs: number,
+  ): void {
     const timers = this.timers.get(id) ?? {};
     timers[key] = setTimeout(callback, delayMs);
     this.timers.set(id, timers);
@@ -627,6 +991,10 @@ export class StatusStore extends EventEmitter {
       clearTimeout(timers.stale);
     }
 
+    if (timers.approval) {
+      clearTimeout(timers.approval);
+    }
+
     this.timers.delete(id);
   }
 
@@ -636,7 +1004,9 @@ export class StatusStore extends EventEmitter {
     }
 
     try {
-      const data = JSON.parse(readFileSync(this.titleOverridesPath, "utf8")) as unknown;
+      const data = JSON.parse(
+        readFileSync(this.titleOverridesPath, "utf8"),
+      ) as unknown;
       const records = asRecord(data);
       for (const [id, title] of Object.entries(records ?? {})) {
         const cleanTitle = text(title);
@@ -650,12 +1020,17 @@ export class StatusStore extends EventEmitter {
   }
 
   private loadProjectNameOverrides(): void {
-    if (!this.projectNameOverridesPath || !existsSync(this.projectNameOverridesPath)) {
+    if (
+      !this.projectNameOverridesPath ||
+      !existsSync(this.projectNameOverridesPath)
+    ) {
       return;
     }
 
     try {
-      const data = JSON.parse(readFileSync(this.projectNameOverridesPath, "utf8")) as unknown;
+      const data = JSON.parse(
+        readFileSync(this.projectNameOverridesPath, "utf8"),
+      ) as unknown;
       const records = asRecord(data);
       for (const [projectId, projectName] of Object.entries(records ?? {})) {
         const cleanProjectName = text(projectName);
@@ -678,7 +1053,7 @@ export class StatusStore extends EventEmitter {
       writeFileSync(
         this.titleOverridesPath,
         `${JSON.stringify(Object.fromEntries(this.titleOverrides), null, 2)}\n`,
-        "utf8"
+        "utf8",
       );
     } catch (error) {
       console.warn("Failed to save session title overrides:", error);
@@ -691,11 +1066,13 @@ export class StatusStore extends EventEmitter {
     }
 
     try {
-      mkdirSync(path.dirname(this.projectNameOverridesPath), { recursive: true });
+      mkdirSync(path.dirname(this.projectNameOverridesPath), {
+        recursive: true,
+      });
       writeFileSync(
         this.projectNameOverridesPath,
         `${JSON.stringify(Object.fromEntries(this.projectNameOverrides), null, 2)}\n`,
-        "utf8"
+        "utf8",
       );
     } catch (error) {
       console.warn("Failed to save project name overrides:", error);
@@ -703,12 +1080,16 @@ export class StatusStore extends EventEmitter {
   }
 }
 
-export function startStatusServer(config: AppConfig, store: StatusStore): Promise<http.Server> {
+export function startStatusServer(
+  config: AppConfig,
+  store: StatusStore,
+): Promise<http.Server> {
   const server = http.createServer(async (request, response) => {
     try {
       await routeRequest(request, response, store);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unexpected server error";
+      const message =
+        error instanceof Error ? error.message : "Unexpected server error";
       sendJson(response, 500, { error: message });
     }
   });
@@ -726,7 +1107,7 @@ export function startStatusServer(config: AppConfig, store: StatusStore): Promis
 async function routeRequest(
   request: IncomingMessage,
   response: ServerResponse,
-  store: StatusStore
+  store: StatusStore,
 ): Promise<void> {
   const url = new URL(request.url ?? "/", "http://localhost");
 
@@ -748,7 +1129,11 @@ async function routeRequest(
   }
 
   if (url.pathname === "/statuses" && request.method === "GET") {
-    sendJson(response, 200, store.getStatuses(url.searchParams.get("includeHidden") === "true"));
+    sendJson(
+      response,
+      200,
+      store.getStatuses(url.searchParams.get("includeHidden") === "true"),
+    );
     return;
   }
 
@@ -790,7 +1175,10 @@ async function routeRequest(
     return;
   }
 
-  if (url.pathname === "/session" && ["DELETE", "POST"].includes(request.method ?? "")) {
+  if (
+    url.pathname === "/session" &&
+    ["DELETE", "POST"].includes(request.method ?? "")
+  ) {
     const body = await readOptionalJsonBody(request);
     const id = text(asRecord(body)?.id) || text(url.searchParams.get("id"));
     if (!id) {
@@ -832,7 +1220,9 @@ async function routeRequest(
     const projectId = text(body?.projectId);
     const projectName = text(body?.projectName);
     if (!projectId || !projectName) {
-      sendJson(response, 400, { error: "projectId and projectName are required" });
+      sendJson(response, 400, {
+        error: "projectId and projectName are required",
+      });
       return;
     }
 
@@ -840,9 +1230,14 @@ async function routeRequest(
     return;
   }
 
-  if (url.pathname === "/project" && ["DELETE", "POST"].includes(request.method ?? "")) {
+  if (
+    url.pathname === "/project" &&
+    ["DELETE", "POST"].includes(request.method ?? "")
+  ) {
     const body = await readOptionalJsonBody(request);
-    const projectId = text(asRecord(body)?.projectId) || text(url.searchParams.get("projectId"));
+    const projectId =
+      text(asRecord(body)?.projectId) ||
+      text(url.searchParams.get("projectId"));
     if (!projectId) {
       sendJson(response, 400, { error: "projectId is required" });
       return;
@@ -864,6 +1259,33 @@ async function routeRequest(
     return;
   }
 
+  if (url.pathname === "/dismiss-project-path" && request.method === "POST") {
+    const body = await readJsonBody(request);
+    const projectPath = text(asRecord(body)?.projectPath);
+    if (!projectPath) {
+      sendJson(response, 400, { error: "projectPath is required" });
+      return;
+    }
+
+    sendJson(response, 200, store.dismissProjectPath(projectPath));
+    return;
+  }
+
+  if (url.pathname === "/cleanup-missing-paths" && request.method === "POST") {
+    sendJson(response, 200, store.cleanupMissingPaths());
+    return;
+  }
+
+  if (url.pathname === "/dismiss-all-done" && request.method === "POST") {
+    sendJson(response, 200, store.clearDone());
+    return;
+  }
+
+  if (url.pathname === "/approve-all-approval" && request.method === "POST") {
+    sendJson(response, 200, store.approveAllApproval());
+    return;
+  }
+
   if (url.pathname === "/clear-done" && request.method === "POST") {
     sendJson(response, 200, store.clearDone());
     return;
@@ -872,7 +1294,9 @@ async function routeRequest(
   sendJson(response, 404, { error: "Not found" });
 }
 
-async function readJsonBody(request: IncomingMessage): Promise<StatusUpdateInput | Record<string, unknown>> {
+async function readJsonBody(
+  request: IncomingMessage,
+): Promise<StatusUpdateInput | Record<string, unknown>> {
   const chunks: Buffer[] = [];
 
   for await (const chunk of request) {
@@ -884,14 +1308,16 @@ async function readJsonBody(request: IncomingMessage): Promise<StatusUpdateInput
   }
 
   try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8")) as StatusUpdateInput;
+    return JSON.parse(
+      Buffer.concat(chunks).toString("utf8"),
+    ) as StatusUpdateInput;
   } catch {
     throw new Error("Request body must be valid JSON");
   }
 }
 
 async function readOptionalJsonBody(
-  request: IncomingMessage
+  request: IncomingMessage,
 ): Promise<StatusUpdateInput | Record<string, unknown> | undefined> {
   const chunks: Buffer[] = [];
 
@@ -904,15 +1330,23 @@ async function readOptionalJsonBody(
   }
 
   try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8")) as StatusUpdateInput;
+    return JSON.parse(
+      Buffer.concat(chunks).toString("utf8"),
+    ) as StatusUpdateInput;
   } catch {
     throw new Error("Request body must be valid JSON");
   }
 }
 
-function sendJson(response: ServerResponse, statusCode: number, payload: unknown): void {
+function sendJson(
+  response: ServerResponse,
+  statusCode: number,
+  payload: unknown,
+): void {
   applyCors(response);
-  response.writeHead(statusCode, { "Content-Type": "application/json; charset=utf-8" });
+  response.writeHead(statusCode, {
+    "Content-Type": "application/json; charset=utf-8",
+  });
   response.end(JSON.stringify(payload));
 }
 
@@ -922,19 +1356,32 @@ function applyCors(response: ServerResponse): void {
   response.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
-function compareProjectStateThenUpdatedAt(a: ProjectStatus, b: ProjectStatus): number {
-  return compareByStateThenUpdatedAt(a.state, a.updatedAt, b.state, b.updatedAt);
+function compareProjectStateThenUpdatedAt(
+  a: ProjectStatus,
+  b: ProjectStatus,
+): number {
+  return compareByStateThenUpdatedAt(
+    a.state,
+    a.updatedAt,
+    b.state,
+    b.updatedAt,
+  );
 }
 
 function compareStateThenUpdatedAt(a: SessionStatus, b: SessionStatus): number {
-  return compareByStateThenUpdatedAt(a.state, a.updatedAt, b.state, b.updatedAt);
+  return compareByStateThenUpdatedAt(
+    a.state,
+    a.updatedAt,
+    b.state,
+    b.updatedAt,
+  );
 }
 
 function compareByStateThenUpdatedAt(
   aState: AgentState,
   aUpdatedAt: number,
   bState: AgentState,
-  bUpdatedAt: number
+  bUpdatedAt: number,
 ): number {
   const priorityDelta = STATE_PRIORITY[bState] - STATE_PRIORITY[aState];
   return priorityDelta || bUpdatedAt - aUpdatedAt;
@@ -951,9 +1398,333 @@ function countStates(sessions: SessionStatus[]): Record<AgentState, number> {
 
 function highestState(states: AgentState[]): AgentState {
   return states.reduce<AgentState>(
-    (highest, state) => (STATE_PRIORITY[state] > STATE_PRIORITY[highest] ? state : highest),
-    "idle"
+    (highest, state) =>
+      STATE_PRIORITY[state] > STATE_PRIORITY[highest] ? state : highest,
+    "idle",
   );
+}
+
+function withFreshProjectPathExists(session: SessionStatus): SessionStatus {
+  if (!session.projectPath) {
+    return { ...session };
+  }
+
+  return {
+    ...session,
+    projectPathExists: projectPathExists(session.projectPath),
+  };
+}
+
+function projectPathExists(value: string | undefined): boolean | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  try {
+    return existsSync(value);
+  } catch {
+    return false;
+  }
+}
+
+function isManualApprovalRequired(session: SessionStatus): boolean {
+  return (
+    session.visibility !== "dismissed" &&
+    session.state === "waiting_approval" &&
+    session.approvalRequired === true
+  );
+}
+
+function shouldDelayApprovalEscalation(
+  input: StatusUpdateInput,
+  session: SessionStatus,
+): boolean {
+  const raw = asRecord(input.raw);
+  const explicitRequired = booleanValue(
+    input.approvalRequired,
+    raw?.approvalRequired,
+    raw?.approval_required,
+    readPath(raw, ["approval", "required"]),
+    readPath(raw, ["permission_request", "required"]),
+  );
+  const explicitMode = approvalModeValue(
+    input.approvalMode,
+    raw?.approvalMode,
+    raw?.approval_mode,
+    readPath(raw, ["approval", "mode"]),
+    readPath(raw, ["permission_request", "mode"]),
+  );
+
+  return (
+    session.source === "codex-hook" &&
+    session.state === "waiting_approval" &&
+    session.lastHookEvent === "PermissionRequest" &&
+    explicitRequired !== true &&
+    explicitMode !== "manual"
+  );
+}
+
+function pendingApprovalSession(session: SessionStatus): SessionStatus {
+  return removeUndefined({
+    ...session,
+    state: "running" as const,
+    message: "Codex is running",
+    reasonCode: "agent_running",
+    reasonMessage: "Agent is running",
+    approvalMode: session.approvalMode === "auto" ? "auto" : "unknown",
+    approvalRequired: false,
+  });
+}
+
+function approvalModeForSessions(sessions: SessionStatus[]): ApprovalMode {
+  if (sessions.some(isManualApprovalRequired)) {
+    return "manual";
+  }
+
+  if (sessions.some((session) => session.approvalMode === "auto")) {
+    return "auto";
+  }
+
+  return "unknown";
+}
+
+function approvalMetadataForInput({
+  input,
+  raw,
+  requestedState,
+  lastHookEvent,
+  lastCommandSummary,
+}: {
+  input: StatusUpdateInput;
+  raw: Record<string, unknown> | undefined;
+  requestedState: AgentState;
+  lastHookEvent?: string;
+  lastCommandSummary?: string;
+}): {
+  approvalMode: ApprovalMode;
+  approvalRequired: boolean;
+  approvalRequestSummary?: string;
+  approvalRequestDetails?: string;
+  approvalLastEvent?: string;
+} {
+  const explicitMode = approvalModeValue(
+    input.approvalMode,
+    raw?.approvalMode,
+    raw?.approval_mode,
+    readPath(raw, ["approval", "mode"]),
+    readPath(raw, ["permission_request", "mode"]),
+  );
+  const explicitRequired = booleanValue(
+    input.approvalRequired,
+    raw?.approvalRequired,
+    raw?.approval_required,
+    readPath(raw, ["approval", "required"]),
+    readPath(raw, ["permission_request", "required"]),
+  );
+  const approvalText = [
+    text(input.message),
+    text(input.reasonMessage),
+    text(raw?.message),
+    text(raw?.approvalMode),
+    text(raw?.approval_mode),
+    text(readPath(raw, ["approval", "mode"])),
+    text(readPath(raw, ["permission_request", "mode"])),
+    text(readPath(raw, ["permission_request", "status"])),
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const autoApproval = explicitMode === "auto" || isAutoApprovalText(approvalText);
+  const manualApprovalEvent =
+    requestedState === "waiting_approval" || lastHookEvent === "PermissionRequest";
+  const approvalMode: ApprovalMode = autoApproval
+    ? "auto"
+    : explicitMode === "manual" || explicitRequired === true || manualApprovalEvent
+      ? "manual"
+      : explicitMode || "unknown";
+  const approvalRequired =
+    explicitRequired ??
+    (approvalMode === "manual" && manualApprovalEvent && !autoApproval);
+  const approvalRequestSummary =
+    text(input.approvalRequestSummary) ||
+    text(raw?.approvalRequestSummary) ||
+    text(raw?.approval_request_summary) ||
+    text(readPath(raw, ["permission_request", "summary"])) ||
+    text(readPath(raw, ["permission_request", "reason"])) ||
+    lastCommandSummary;
+  const approvalRequestDetails =
+    text(input.approvalRequestDetails) ||
+    text(raw?.approvalRequestDetails) ||
+    text(raw?.approval_request_details) ||
+    text(readPath(raw, ["permission_request", "details"])) ||
+    text(readPath(raw, ["permission_request", "description"])) ||
+    text(readPath(raw, ["permission_request", "command"])) ||
+    text(raw?.command);
+
+  return removeUndefined({
+    approvalMode,
+    approvalRequired,
+    approvalRequestSummary,
+    approvalRequestDetails,
+    approvalLastEvent:
+      text(input.approvalLastEvent) ||
+      text(raw?.approvalLastEvent) ||
+      text(raw?.approval_last_event) ||
+      lastHookEvent,
+  });
+}
+
+function approvalModeValue(...values: unknown[]): ApprovalMode | undefined {
+  for (const value of values) {
+    const candidate = text(value)?.toLowerCase();
+    if (!candidate) {
+      continue;
+    }
+
+    if (["manual", "manual approval", "user"].includes(candidate)) {
+      return "manual";
+    }
+
+    if (
+      [
+        "auto",
+        "automatic",
+        "auto approval",
+        "auto-approval",
+        "approve for me",
+        "替我审批",
+      ].includes(candidate)
+    ) {
+      return "auto";
+    }
+
+    if (candidate === "unknown") {
+      return "unknown";
+    }
+  }
+
+  return undefined;
+}
+
+function booleanValue(...values: unknown[]): boolean | undefined {
+  for (const value of values) {
+    if (typeof value === "boolean") {
+      return value;
+    }
+
+    const candidate = text(value)?.toLowerCase();
+    if (!candidate) {
+      continue;
+    }
+
+    if (["true", "1", "yes", "required"].includes(candidate)) {
+      return true;
+    }
+
+    if (["false", "0", "no", "not_required", "none"].includes(candidate)) {
+      return false;
+    }
+  }
+
+  return undefined;
+}
+
+function isAutoApprovalText(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return [
+    "auto approval",
+    "auto-approval",
+    "automatic approval",
+    "approve for me",
+    "approved automatically",
+    "auto approved",
+    "替我审批",
+    "自动审批",
+    "自动批准",
+  ].some((marker) => normalized.includes(marker));
+}
+
+interface ReasonInput {
+  state: AgentState;
+  message?: string;
+  reasonCode?: string;
+  reasonMessage?: string;
+  lastHookEvent?: string;
+  lastCommandSummary?: string;
+  approvalRequired?: boolean;
+}
+
+function reasonForStatus(input: ReasonInput): {
+  reasonCode: string;
+  reasonMessage: string;
+} {
+  const explicitCode = text(input.reasonCode);
+  const explicitMessage = text(input.reasonMessage);
+  if (explicitCode && explicitMessage) {
+    return { reasonCode: explicitCode, reasonMessage: explicitMessage };
+  }
+
+  if (
+    input.state === "waiting_approval" &&
+    input.approvalRequired === true
+  ) {
+    return {
+      reasonCode: explicitCode || "permission_request",
+      reasonMessage:
+        explicitMessage ||
+        "Waiting for your approval",
+    };
+  }
+
+  if (input.state === "running") {
+    return {
+      reasonCode: explicitCode || "agent_running",
+      reasonMessage: explicitMessage || "Agent is running",
+    };
+  }
+
+  if (input.state === "done" || input.lastHookEvent === "Stop") {
+    return {
+      reasonCode: explicitCode || "agent_completed",
+      reasonMessage: explicitMessage || "Agent response completed",
+    };
+  }
+
+  if (input.state === "stale") {
+    return {
+      reasonCode: explicitCode || "no_status_update_after_running",
+      reasonMessage: explicitMessage || "No status update after running",
+    };
+  }
+
+  if (input.state === "error") {
+    if (isQuotaLimitText(input.message)) {
+      return {
+        reasonCode: explicitCode || "quota_or_usage_limit",
+        reasonMessage: explicitMessage || "Codex quota or usage limit reached",
+      };
+    }
+
+    return {
+      reasonCode: explicitCode || "agent_error",
+      reasonMessage: explicitMessage || text(input.message) || "Agent error",
+    };
+  }
+
+  return {
+    reasonCode: explicitCode || "agent_idle",
+    reasonMessage: explicitMessage || "No visible sessions need attention",
+  };
+}
+
+function commandSummaryFromRaw(
+  raw: Record<string, unknown> | undefined,
+): string | undefined {
+  const command = text(raw?.command);
+  return command ? `Run: ${summarizeText(command)}` : undefined;
+}
+
+function summarizeText(value: string): string {
+  return value.length > 80 ? `${value.slice(0, 79)}…` : value;
 }
 
 function defaultMessage(state: AgentState): string {
@@ -972,6 +1743,93 @@ function defaultMessage(state: AgentState): string {
     default:
       return "Codex is idle";
   }
+}
+
+function hasQuotaLimitSignal(
+  input:
+    | Pick<StatusUpdateInput, "message" | "raw">
+    | Pick<SessionStatus, "message" | "raw">,
+  raw: Record<string, unknown> | undefined,
+): boolean {
+  const candidates = [text(input.message), ...quotaSignalStrings(raw)].filter(
+    Boolean,
+  );
+  return candidates.some((candidate) => isQuotaLimitText(candidate));
+}
+
+function quotaSignalStrings(
+  value: unknown,
+  parentKey = "",
+  depth = 0,
+): string[] {
+  if (depth > 5 || value === undefined || value === null) {
+    return [];
+  }
+
+  if (typeof value === "string") {
+    return isQuotaSignalKey(parentKey) ? [value] : [];
+  }
+
+  if (Array.isArray(value)) {
+    return value.flatMap((item) =>
+      quotaSignalStrings(item, parentKey, depth + 1),
+    );
+  }
+
+  if (typeof value !== "object") {
+    return [];
+  }
+
+  return Object.entries(value as Record<string, unknown>).flatMap(
+    ([key, child]) => quotaSignalStrings(child, key, depth + 1),
+  );
+}
+
+function isQuotaSignalKey(key: string): boolean {
+  const normalized = key.toLowerCase();
+  return [
+    "error",
+    "errors",
+    "exception",
+    "message",
+    "reason",
+    "status",
+    "stderr",
+    "stdout",
+    "output",
+    "detail",
+    "details",
+    "code",
+    "last_error",
+    "lastError",
+  ].some((signalKey) => normalized === signalKey.toLowerCase());
+}
+
+function isQuotaLimitText(value: string | undefined): boolean {
+  if (!value) {
+    return false;
+  }
+
+  const normalized = value.toLowerCase();
+  return [
+    /quota.{0,40}(exceeded|exhausted|limit|used up|reached)/,
+    /(exceeded|exhausted|reached).{0,40}quota/,
+    /usage.{0,40}(limit|exceeded|exhausted|reached)/,
+    /(limit|rate limit).{0,40}(exceeded|reached)/,
+    /insufficient.{0,20}(quota|credits|balance)/,
+    /out of.{0,20}(quota|credits)/,
+    /额度.{0,20}(用完|耗尽|不足|达到|超出|限制)/,
+    /(用完|耗尽|不足|达到|超出).{0,20}额度/,
+  ].some((pattern) => pattern.test(normalized));
+}
+
+function quotaLimitMessage(message: string | undefined): string {
+  const explicitMessage = text(message);
+  if (explicitMessage && isQuotaLimitText(explicitMessage)) {
+    return explicitMessage;
+  }
+
+  return "Codex quota or usage limit reached";
 }
 
 function displayNameFromProject(value: string | undefined): string | undefined {
@@ -1005,7 +1863,10 @@ function isDefaultSessionId(sessionId: string | undefined): boolean {
   return Boolean(sessionId?.includes("default-session"));
 }
 
-function shouldRedisplay(next: SessionStatus, previous: SessionStatus | undefined): boolean {
+function shouldRedisplay(
+  next: SessionStatus,
+  previous: SessionStatus | undefined,
+): boolean {
   if (previous?.visibility !== "dismissed") {
     return true;
   }
@@ -1019,7 +1880,7 @@ function shouldRedisplay(next: SessionStatus, previous: SessionStatus | undefine
 
 function pickCodexThreadId(
   input: StatusUpdateInput,
-  raw: Record<string, unknown> | undefined
+  raw: Record<string, unknown> | undefined,
 ): string | undefined {
   const candidates = [
     text(readPath(raw, ["session_meta", "payload", "id"])),
@@ -1031,7 +1892,7 @@ function pickCodexThreadId(
     text(raw?.session_id),
     text(raw?.sessionId),
     text(raw?.conversation_id),
-    text(raw?.conversationId)
+    text(raw?.conversationId),
   ];
 
   return candidates.find(isCodexThreadId);
@@ -1039,7 +1900,7 @@ function pickCodexThreadId(
 
 function pickCodexSessionId(
   input: StatusUpdateInput,
-  raw: Record<string, unknown> | undefined
+  raw: Record<string, unknown> | undefined,
 ): string | undefined {
   return (
     text(input.codexSessionId) ||
@@ -1093,7 +1954,7 @@ async function openTarget(target: string): Promise<void> {
 async function openCodexDeepLink(
   target: string,
   bundleId: string,
-  appName: string
+  appName: string,
 ): Promise<void> {
   if (process.platform === "darwin") {
     if (bundleId) {
@@ -1109,7 +1970,10 @@ async function openCodexDeepLink(
   await openTarget(target);
 }
 
-async function openCodexApp(appName: string, bundleId: string): Promise<boolean> {
+async function openCodexApp(
+  appName: string,
+  bundleId: string,
+): Promise<boolean> {
   try {
     if (process.platform === "darwin") {
       if (bundleId) {
@@ -1128,7 +1992,10 @@ async function openCodexApp(appName: string, bundleId: string): Promise<boolean>
   }
 }
 
-async function activateCodexApp(appName: string, bundleId: string): Promise<void> {
+async function activateCodexApp(
+  appName: string,
+  bundleId: string,
+): Promise<void> {
   if (process.platform !== "darwin") {
     return;
   }
@@ -1167,7 +2034,7 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-function removeUndefined(value: SessionStatus): SessionStatus {
+function removeUndefined<T extends object>(value: T): T {
   const next = { ...value } as Record<string, unknown>;
   for (const key of Object.keys(next)) {
     if (typeof next[key] === "undefined") {
@@ -1175,5 +2042,5 @@ function removeUndefined(value: SessionStatus): SessionStatus {
     }
   }
 
-  return next as unknown as SessionStatus;
+  return next as T;
 }

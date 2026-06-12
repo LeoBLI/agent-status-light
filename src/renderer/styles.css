@@ -130,11 +130,46 @@ button {
   margin-top: 3px;
 }
 
+.approval-mode {
+  margin-top: 3px;
+  overflow: hidden;
+  color: rgba(247, 250, 252, 0.55);
+  font-size: 10px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bulk-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.bulk-actions button {
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(247, 250, 252, 0.78);
+  font: inherit;
+  font-size: 10px;
+  line-height: 1.15;
+  padding: 4px 6px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bulk-actions button:disabled {
+  opacity: 0.45;
+}
+
 .tree {
   display: grid;
   gap: 5px;
   margin-top: 8px;
-  max-height: calc(100vh - 88px);
+  max-height: calc(100vh - 124px);
   overflow: hidden;
   padding-right: 2px;
 }
@@ -145,7 +180,7 @@ button {
 
 .row {
   display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) auto auto;
+  grid-template-columns: 18px minmax(0, 1fr) auto auto auto;
   gap: 7px;
   min-height: 30px;
 }
@@ -172,6 +207,35 @@ button {
   font-size: 12px;
 }
 
+
+.session-details {
+  display: grid;
+  gap: 2px;
+  margin-top: 5px;
+  padding: 5px 6px;
+  border-left: 2px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(247, 250, 252, 0.62);
+  font-size: 10px;
+  line-height: 1.25;
+}
+
+.detail-row {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 6px;
+}
+
+.detail-key {
+  color: rgba(247, 250, 252, 0.46);
+}
+
+.detail-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .empty {
   color: rgba(247, 250, 252, 0.55);
   font-size: 12px;
@@ -179,7 +243,8 @@ button {
 }
 
 .dismiss,
-.open-session {
+.open-session,
+.details-toggle {
   align-self: start;
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 6px;
@@ -192,6 +257,10 @@ button {
 
 .open-session {
   background: rgba(6, 182, 212, 0.12);
+}
+
+.details-toggle {
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .open-session:disabled {

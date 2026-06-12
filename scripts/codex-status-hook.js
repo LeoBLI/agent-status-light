@@ -9,11 +9,14 @@ let state = stateArg || "idle";
 let message = messageParts.join(" ") || defaultMessage(state);
 const project = path.basename(process.cwd());
 const logPath =
+  process.env.AGENTWATCH_HOOK_LOG ||
   process.env.AGENT_STATUS_LIGHT_HOOK_LOG ||
   "/Users/leoclaw/Projects/AgentWatch/logs/codex-hook.log";
 
 main().catch((error) => {
-  appendLog(`hook unexpected error=${error instanceof Error ? error.message : String(error)}`);
+  appendLog(
+    `hook unexpected error=${error instanceof Error ? error.message : String(error)}`,
+  );
 });
 
 async function main() {
@@ -24,21 +27,34 @@ async function main() {
     message = "Codex finished";
   }
 
+  const normalizedState = hasQuotaLimitSignal(message, parsed)
+    ? "error"
+    : state;
+  const normalizedMessage = hasQuotaLimitSignal(message, parsed)
+    ? quotaLimitMessage(message)
+    : message;
+
   const payload = {
     agent: "codex",
-    state,
+    lastHookEvent: text(parsed?.hook_event_name),
+    lastCwd: text(parsed?.cwd) || process.cwd(),
+    state: normalizedState,
     source: "codex-hook",
-    message,
+    message: normalizedMessage,
+    projectPath: text(parsed?.cwd) || process.cwd(),
     project,
+    projectName: project,
     codexSessionId: extractCodexSessionId(parsed),
     codexThreadId: extractCodexThreadId(parsed),
     codexDeepLink: extractCodexThreadId(parsed)
       ? `codex://threads/${extractCodexThreadId(parsed)}`
       : undefined,
-    raw: parsed || undefined
+    raw: parsed || undefined,
   };
 
-  appendLog(`hook invoked state=${state} message=${JSON.stringify(message)} cwd=${process.cwd()}`);
+  appendLog(
+    `hook invoked state=${state} message=${JSON.stringify(message)} cwd=${process.cwd()}`,
+  );
 
   try {
     const body = await postStatus(payload);
@@ -70,7 +86,7 @@ function extractCodexThreadId(parsed) {
     text(parsed?.session_id),
     text(parsed?.sessionId),
     text(parsed?.conversation_id),
-    text(parsed?.conversationId)
+    text(parsed?.conversationId),
   ];
 
   return candidates.find(isUuid);
@@ -94,7 +110,9 @@ function text(value) {
 function isUuid(value) {
   return (
     typeof value === "string" &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      value,
+    )
   );
 }
 
@@ -137,22 +155,26 @@ function postStatus(body) {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Content-Length": Buffer.byteLength(data)
+          "Content-Length": Buffer.byteLength(data),
         },
-        timeout: 3000
+        timeout: 3000,
       },
       (response) => {
         const chunks = [];
         response.on("data", (chunk) => chunks.push(chunk));
         response.on("end", () => {
           const responseBody = Buffer.concat(chunks).toString("utf8");
-          if (response.statusCode && response.statusCode >= 200 && response.statusCode < 300) {
+          if (
+            response.statusCode &&
+            response.statusCode >= 200 &&
+            response.statusCode < 300
+          ) {
             resolve(responseBody);
           } else {
             reject(new Error(`HTTP ${response.statusCode}: ${responseBody}`));
           }
         });
-      }
+      },
     );
 
     request.on("timeout", () => {
@@ -188,4 +210,80 @@ function defaultMessage(nextState) {
     default:
       return "Codex is idle";
   }
+}
+
+function hasQuotaLimitSignal(message, parsed) {
+  const candidates = [text(message), ...quotaSignalStrings(parsed)].filter(
+    Boolean,
+  );
+  return candidates.some(isQuotaLimitText);
+}
+
+function quotaSignalStrings(value, parentKey = "", depth = 0) {
+  if (depth > 5 || value === undefined || value === null) {
+    return [];
+  }
+
+  if (typeof value === "string") {
+    return isQuotaSignalKey(parentKey) ? [value] : [];
+  }
+
+  if (Array.isArray(value)) {
+    return value.flatMap((item) =>
+      quotaSignalStrings(item, parentKey, depth + 1),
+    );
+  }
+
+  if (typeof value !== "object") {
+    return [];
+  }
+
+  return Object.entries(value).flatMap(([key, child]) =>
+    quotaSignalStrings(child, key, depth + 1),
+  );
+}
+
+function isQuotaSignalKey(key) {
+  const normalized = key.toLowerCase();
+  return [
+    "error",
+    "errors",
+    "exception",
+    "message",
+    "reason",
+    "status",
+    "stderr",
+    "stdout",
+    "output",
+    "detail",
+    "details",
+    "code",
+    "last_error",
+    "lastError",
+  ].some((signalKey) => normalized === signalKey.toLowerCase());
+}
+
+function isQuotaLimitText(value) {
+  if (!value) {
+    return false;
+  }
+
+  const normalized = value.toLowerCase();
+  return [
+    /quota.{0,40}(exceeded|exhausted|limit|used up|reached)/,
+    /(exceeded|exhausted|reached).{0,40}quota/,
+    /usage.{0,40}(limit|exceeded|exhausted|reached)/,
+    /(limit|rate limit).{0,40}(exceeded|reached)/,
+    /insufficient.{0,20}(quota|credits|balance)/,
+    /out of.{0,20}(quota|credits)/,
+    /额度.{0,20}(用完|耗尽|不足|达到|超出|限制)/,
+    /(用完|耗尽|不足|达到|超出).{0,20}额度/,
+  ].some((pattern) => pattern.test(normalized));
+}
+
+function quotaLimitMessage(message) {
+  const explicitMessage = text(message);
+  return isQuotaLimitText(explicitMessage)
+    ? explicitMessage
+    : "Codex quota or usage limit reached";
 }

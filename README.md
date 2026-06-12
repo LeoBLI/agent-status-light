@@ -4,7 +4,7 @@ Keep an eye on your agents.
 
 AgentWatch is a desktop companion that watches your AI agent sessions, alerts you when they need attention, and helps you return to the right task.
 
-Status: v0.3.0 — macOS menu bar app shell for Codex CLI/Desktop hooks.
+Status: v0.3.2 — Approval UX and Done Cleanup.
 
 ```text
 Signal Sources
@@ -249,37 +249,120 @@ Behavior:
 - It does not copy anything to the clipboard.
 - This endpoint does not change the session state.
 
-## Status v2
+## State Semantics
+
+AgentWatch v0.3.1 fixes the state semantics around approval, completion, stale sessions, errors, and old migrated paths.
+
+AgentWatch v0.3.2 keeps those semantics and adds focused approval UX / cleanup controls:
+
+- Main panel `Dismiss all done (N)` hides only visible `done` sessions.
+- Main panel `Approve all approval (N)` targets only visible `waiting_approval` sessions with `approvalRequired: true`.
+- `Approve all approval` is currently a UI/API placeholder because no reliable underlying Codex approve action is available yet. It returns `approve_action_not_available` and does not mark sessions done.
+- Each session has an independent `Details` toggle.
+- Auto-approval events are recorded as diagnostics but do not trigger the red `waiting_approval` light.
 
 States:
 
-- `idle`: no active work. Gray light, label `Idle`.
+- `idle`: no visible sessions need attention. Gray light, label `Idle`. Idle sessions are hidden from the default tree and are mainly visible through debug/includeHidden views.
 - `running`: Codex is actively working or using tools. Green light, label `Running`.
-- `waiting_approval`: Codex needs user approval. Flashing red light, label `Approval Required`.
-- `done`: the last task just completed. Blue/cyan light, label `Done`.
-- `error`: the agent or service hit an error. Orange/yellow light, label `Error`.
-- `stale`: Codex was running, but no fresh status event arrived before the stale timeout. Purple slow-flashing light, label `Stale`.
+- `waiting_approval`: Codex explicitly requested manual user approval through `PermissionRequest`, with `approvalRequired: true`. Flashing red light, label `Approval Required`.
+- `done`: Codex completed its response/task through the `Stop` hook and is waiting for human review. Blue/cyan light, label `Done`.
+- `error`: a known failure or environment problem occurred, such as quota/usage limit, network failure, hook reporter failure, local service error, or tool/environment failure. Orange/yellow light, label `Error`.
+- `stale`: the session was previously running, but AgentWatch has not received a new event for a long time, so the current state is no longer reliable. Purple slow-flashing light, label `Stale`.
 
 Transition rules:
 
-- `waiting_approval` has the highest visual priority and never becomes `stale` automatically.
-- `done` stays visible until the user dismisses it. It does not automatically change to `idle`.
-- `running` becomes `stale` after 10 minutes without any new valid status event.
-- Override the stale timeout for development with `STALE_TIMEOUT_MS=10000`.
-- Any new valid state event can replace `stale`.
-- `error` does not automatically return to `idle`; send another state event to clear it.
+- `PermissionRequest -> waiting_approval` only when manual approval is required. Only visible sessions with `approvalRequired: true` participate in the overall red light. Dismissed sessions and cleaned-up missing paths do not.
+- Auto approval events use `approvalMode: "auto"` and stay out of `waiting_approval`.
+- If hooks do not report the approval mode, the panel shows `Approval mode: Not reported`.
+- `Stop -> done`. Done stays visible until the user dismisses it. It does not automatically change to `idle` and does not auto-dismiss.
+- `PostToolUse` is not `done`. It only means a tool finished, not that the agent's final response completed.
+- `running -> stale` after `STALE_TIMEOUT_MS` without any new status event. The default is 10 minutes.
+- `quota`, `usage limit`, `额度`, `rate limit`, or `limit reached` in error/message fields are normalized to `error` with reason `quota_or_usage_limit`.
+- `waiting_approval` never becomes `stale` automatically. A real approval request must keep warning until another valid event overrides it or the user dismisses it.
+- `Dismiss` only hides the AgentWatch panel item. It does not delete the Codex conversation.
 
-The expanded UI shows the full project/session tree. Done sessions show a `Dismiss` button.
+Each session has reason fields:
 
-Test `done`:
+```text
+reasonCode
+reasonMessage
+lastHookEvent
+lastCommandSummary
+lastCwd
+projectPathExists
+approvalMode
+approvalRequired
+approvalRequestSummary
+approvalRequestDetails
+approvalLastEvent
+```
+
+Default session rows stay compact:
+
+```text
+displayTitle
+State · duration · reasonMessage
+[Open] [Details] [Dismiss]
+```
+
+Click `Details` on an individual session to expand reason code, last hook event, command summary, source, update time, duration, project path, project path existence, cwd, session id, and approval metadata.
+
+Bulk cleanup:
+
+```bash
+curl -s -X POST http://localhost:8787/dismiss-all-done
+```
+
+Bulk approval placeholder:
+
+```bash
+curl -s -X POST http://localhost:8787/approve-all-approval
+```
+
+Until a real approve action exists, this returns `ok: false`, `reasonCode: "approve_action_not_available"`, and per-session failures for currently visible manual approval sessions.
+
+Old project paths can leave historical sessions, especially old `PermissionRequest` events from before a project migration. Clean them without deleting Codex conversations:
+
+```bash
+curl -s -X POST http://localhost:8787/cleanup-missing-paths
+
+curl -s -X POST http://localhost:8787/dismiss-project-path \
+  -H "Content-Type: application/json" \
+  -d '{"projectPath":"/old/path"}'
+```
+
+Test `done` persistence:
 
 ```bash
 curl -s -X POST http://localhost:8787/status \
   -H "Content-Type: application/json" \
-  -d '{"agent":"codex","state":"done","source":"manual","message":"Task completed"}'
+  -d '{"agent":"codex","projectPath":"/Users/leoclaw/Projects/AgentWatch","projectName":"AgentWatch","sessionId":"reason-done","title":"Done persistence test","state":"done","source":"manual","message":"Completed","lastHookEvent":"Stop"}'
 ```
 
-The session should show `Done` and remain visible until dismissed.
+The session should show `Done · ... · Agent response completed` and remain visible until dismissed.
+
+Test `stale` quickly:
+
+```bash
+STALE_TIMEOUT_MS=10000 npm run dev
+
+curl -s -X POST http://localhost:8787/status \
+  -H "Content-Type: application/json" \
+  -d '{"agent":"codex","projectPath":"/Users/leoclaw/Projects/AgentWatch","projectName":"AgentWatch","sessionId":"reason-stale","title":"Stale reason test","state":"running","source":"manual","message":"Codex is running"}'
+```
+
+After the timeout, the session should show `Stale` with reason `No status update after running`.
+
+Test quota/error reason:
+
+```bash
+curl -s -X POST http://localhost:8787/status \
+  -H "Content-Type: application/json" \
+  -d '{"agent":"codex","projectPath":"/Users/leoclaw/Projects/AgentWatch","projectName":"AgentWatch","sessionId":"quota-error","title":"Quota error test","state":"error","source":"manual","message":"Codex quota exhausted"}'
+```
+
+The session should show `Error · ... · Codex quota or usage limit reached`.
 
 ## Open in Codex
 
@@ -430,7 +513,7 @@ Correct a session title only when you are sure the session `id` belongs to that 
 ```bash
 curl -s -X POST http://localhost:8787/session-title \
   -H "Content-Type: application/json" \
-  -d '{"id":"AgentLight::AgentLight::default-session","title":"Actual session title"}'
+  -d '{"id":"/Users/leoclaw/Projects/AgentWatch::default-session","title":"Actual session title"}'
 ```
 
 Later hook events that do not contain a title preserve the corrected title.
@@ -638,7 +721,7 @@ Current validation:
 - Codex CLI shows the hook trust flow for new or changed command hooks.
 - Codex CLI successfully triggers `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, and `Stop`.
 - `PermissionRequest` can update AgentWatch to `waiting_approval` with `source: "codex-hook"`.
-- `Stop` maps to `done`, not `idle`, so you can see that the previous task just completed before the light returns to idle automatically.
+- `Stop` maps to `done`, not `idle`; the completed session stays visible until you dismiss it.
 
 Codex Desktop App supports command hooks in current testing, but each project or surface may require a hook review/trust flow before the commands run. If Desktop does not turn the light red, first open the hooks configuration UI and confirm the five hooks are enabled: `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, and `Stop`.
 
@@ -649,7 +732,7 @@ Recommended workflow:
 3. If Desktop does not trigger hooks, review/trust the hooks in that project and start a new conversation if needed.
 4. Add or enable a future fallback monitor, such as `codex-desktop-monitor` or `browser-monitor`, if a surface still does not emit hooks.
 
-Internal Codex tasks can also emit hooks. By default, `scripts/codex-hook-reporter.js` ignores `~/.codex/memories`, so the internal memory writing agent does not appear as a user project named `memories`. To customize ignored paths, set `AGENT_STATUS_LIGHT_IGNORE_PATHS` to a path-delimited list.
+Internal Codex tasks can also emit hooks. By default, `scripts/codex-hook-reporter.js` ignores `~/.codex/memories`, so the internal memory writing agent does not appear as a user project named `memories`. To customize ignored paths, set `AGENTWATCH_IGNORE_PATHS` to a path-delimited list. The older `AGENT_STATUS_LIGHT_IGNORE_PATHS` name is still accepted for existing hook setups.
 
 ## Configuration
 
